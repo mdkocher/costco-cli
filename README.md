@@ -69,6 +69,7 @@ By default alerts are macOS notifications on the machine running the schedule. T
 
 ```bash
 costco notify twilio   # prompts for Account SID, from/to numbers, and auth token (hidden)
+# step-by-step Twilio signup: docs/SETUP.md#4-set-up-text-alerts-with-twilio
 costco notify test
 ```
 
@@ -80,7 +81,9 @@ You get a text when new price drops show up, and when the saved Costco sign-in h
 
 ## Running on an always-on Mac
 
-A Mac mini or any Mac that stays on works well:
+Full walkthrough, including Twilio signup and troubleshooting: **[docs/SETUP.md](docs/SETUP.md)**.
+
+Short version:
 
 1. Install Google Chrome and Python 3 (`brew install python pipx`).
 2. `pipx install git+https://github.com/mdkocher/costco-cli`
