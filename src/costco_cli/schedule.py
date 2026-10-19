@@ -1,4 +1,4 @@
-"""Daily background sync via launchd, with macOS notifications for price drops."""
+"""Daily background sync via launchd."""
 import plistlib
 import shutil
 import subprocess
@@ -9,15 +9,6 @@ from . import config
 
 LABEL = "com.github.mdkocher.costco-cli"
 PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
-
-
-def notify(title, message):
-    script = f'display notification {_quote(message)} with title {_quote(title)}'
-    subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
-
-
-def _quote(s):
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _costco_command():

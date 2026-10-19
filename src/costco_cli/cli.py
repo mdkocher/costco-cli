@@ -1,10 +1,11 @@
 """costco: track your Costco purchases and catch price adjustments."""
 import argparse
+import getpass
 import json
 import sys
 from datetime import date, datetime, timedelta
 
-from . import __version__, auth, config, db, prices, schedule, sync
+from . import __version__, auth, config, db, notify, prices, schedule, sync
 from .api import ApiError
 
 
@@ -207,9 +208,13 @@ def notify_new_drops(con, drops):
     fresh = [d for d in drops if d.key not in seen]
     if fresh:
         total = sum(d.total for d in fresh)
-        first = fresh[0].name or fresh[0].item_number
-        more = f" and {len(fresh) - 1} more" if len(fresh) > 1 else ""
-        schedule.notify("Costco price drop", f"{money(total)} back: {first}{more}. Run: costco drops")
+        items = "; ".join(f"{(d.name or d.item_number)[:30]} {money(d.total)} by {d.deadline:%b %-d}" for d in fresh[:3])
+        more = f" (+{len(fresh) - 3} more)" if len(fresh) > 3 else ""
+        try:
+            notify.send(con, "Costco price drop", f"{money(total)} back. {items}{more}. Run: costco drops")
+        except Exception as e:
+            print(f"alert failed: {e}")
+            return []  # leave them un-notified so tomorrow's run retries
     # Everything current is now notified; drops whose window closed fall off.
     db.set_meta(con, "notified_drops", json.dumps(sorted(d.key for d in drops)))
     con.commit()
@@ -223,7 +228,10 @@ def cmd_daily(args, con):
         sync.run(con)
     except auth.AuthError as e:
         print(e)
-        schedule.notify("costco-cli", "Costco sign-in expired. Run: costco login")
+        try:
+            notify.send(con, "costco-cli", "Costco sign-in expired. Run: costco login on the sync Mac")
+        except Exception as ne:
+            print(f"alert failed: {ne}")
         return 1
     fresh = notify_new_drops(con, prices.find_drops(con))
     print(f"{len(fresh)} new price drops")
@@ -245,6 +253,42 @@ def cmd_coupons(args, con):
     table([[r["item_number"], (r["name"] or "")[:56], money(r["discount"]), money(r["price_after"]), r["valid_to"]]
            for r in rows], ["Item", "Name", "Off", "Price", "Until"], right={2, 3})
     print(f"\n{len(rows)} coupons" + (" on things you've bought before" if args.mine else ""))
+
+
+def cmd_notify(args, con):
+    if args.action == "twilio":
+        print("Twilio SMS setup. Find these at console.twilio.com.")
+        sid = input("Account SID: ").strip()
+        from_ = input("Twilio phone number to send from (+15551234567): ").strip()
+        to = input("Your mobile number (+15551234567): ").strip()
+        token = getpass.getpass("Auth token (hidden): ").strip()
+        if not (sid and from_ and to and token):
+            sys.exit("All four values are needed.")
+        notify.save_token(sid, token)
+        for k, v in (("twilio_sid", sid), ("twilio_from", from_), ("twilio_to", to), ("notify_channel", "twilio")):
+            db.set_meta(con, k, v)
+        con.commit()
+        print("Saved. Token is in your macOS Keychain (service costco-cli-twilio). Sending a test message...")
+        notify.send(con, "costco-cli", "SMS alerts are set up.")
+        print("Sent.")
+    elif args.action == "test":
+        used = notify.send(con, "costco-cli", "Test alert.")
+        print(f"Sent via {used}.")
+    elif args.action == "macos":
+        s = notify.twilio_settings(con)
+        if s:
+            notify.delete_token(s["sid"])
+        for k in ("twilio_sid", "twilio_from", "twilio_to"):
+            con.execute("DELETE FROM meta WHERE key = ?", (k,))
+        db.set_meta(con, "notify_channel", "macos")
+        con.commit()
+        print("Alerts will use macOS notifications. Twilio settings and Keychain token removed.")
+    else:
+        s = notify.twilio_settings(con)
+        if notify.channel(con) == "twilio" and s:
+            print(f"SMS via Twilio from {s['from']} to {s['to']}")
+        else:
+            print("macOS notifications on this computer")
 
 
 def cmd_schedule(args, con):
@@ -309,6 +353,10 @@ def build_parser():
     p.add_argument("--mine", action="store_true", help="only items you've bought before")
     p.set_defaults(fn=cmd_coupons)
 
+    p = sub.add_parser("notify", help="where alerts go: macOS notifications or SMS via Twilio")
+    p.add_argument("action", choices=["status", "twilio", "test", "macos"], nargs="?", default="status")
+    p.set_defaults(fn=cmd_notify)
+
     p = sub.add_parser("schedule", help="run sync + drop alerts daily in the background")
     p.add_argument("action", choices=["install", "uninstall", "status"], nargs="?", default="status")
     p.add_argument("--time", default="07:00", help="HH:MM, default 07:00")
@@ -325,7 +373,7 @@ def main(argv=None):
     try:
         rc = args.fn(args, con)
         return rc if isinstance(rc, int) else 0
-    except (auth.AuthError, ApiError) as e:
+    except (auth.AuthError, ApiError, notify.NotifyError) as e:
         print(f"costco: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -21,7 +21,7 @@ $14.40 in possible price adjustments. Bring the receipt to the membership counte
 - **`spend`** summarizes spending by month, year, type (warehouse / online / gas), location or department.
 - **`returns`** lists items still inside the price-adjustment (30 day) or electronics return (90 day) window.
 - **`coupons`** shows the current coupon book, or just the items you've bought before (`--mine`).
-- **`schedule`** runs a sync every morning and sends a macOS notification when there is money to claim.
+- **`schedule`** runs a sync every morning and alerts you when there is money to claim, by macOS notification or SMS (Twilio).
 
 ## Install
 
@@ -60,7 +60,36 @@ costco schedule install   # daily sync + notifications at 07:00
 | `costco returns [--days 30]` | Items still inside a return/adjustment window. |
 | `costco drops` | Price drops you can claim. |
 | `costco coupons [search] [--mine]` | Current warehouse coupon book. |
-| `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with notifications (launchd). |
+| `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
+| `costco notify [status\|twilio\|test\|macos]` | Choose where alerts go. |
+
+## Alerts
+
+By default alerts are macOS notifications on the machine running the schedule. To get them as text messages instead:
+
+```bash
+costco notify twilio   # prompts for Account SID, from/to numbers, and auth token (hidden)
+costco notify test
+```
+
+The Twilio auth token is stored in the macOS Keychain (service `costco-cli-twilio`), never in a file. The SID and phone numbers go in the local database. `costco notify macos` switches back and deletes the Keychain entry.
+
+Twilio notes: a trial account can only text numbers you've verified and adds a trial prefix. US numbers need A2P 10DLC registration (or a verified toll-free number) before carriers will deliver messages reliably.
+
+You get a text when new price drops show up, and when the saved Costco sign-in has expired.
+
+## Running on an always-on Mac
+
+A Mac mini or any Mac that stays on works well:
+
+1. Install Google Chrome and Python 3 (`brew install python pipx`).
+2. `pipx install git+https://github.com/mdkocher/costco-cli`
+3. `costco login`. This needs the Mac's screen; Screen Sharing from another Mac works.
+4. `costco notify twilio`
+5. `costco schedule install --time 07:00`
+6. Keep it from sleeping (System Settings > Energy > Prevent automatic sleeping). launchd also runs a missed job when the Mac wakes.
+
+The job runs as a LaunchAgent, so your user needs to be logged in (after a restart, log in once). When the Costco sign-in eventually expires you'll get a text; connect with Screen Sharing and run `costco login`.
 
 ## How it works
 
@@ -80,14 +109,16 @@ chrome-profile/   the Chrome profile holding your Costco sign-in
 logs/daily.log    output of the scheduled job
 ```
 
-Delete that folder to remove everything.
+Plus, if you use SMS alerts, one Keychain item named `costco-cli-twilio`.
+
+Delete that folder (and run `costco notify macos` first if you set up SMS) to remove everything.
 
 ## Caveats
 
 - Unofficial. This uses Costco's website endpoints, which can change without notice. It only reads your own account, a few requests per sync.
 - In-store prices aren't published, so warehouse drops only cover items in the current coupon book. Gas is tracked for spending only.
 - Price adjustments are at Costco's discretion. Check the item and date before heading to the counter.
-- macOS only for now (Chrome path, launchd, notifications). Set `COSTCO_CLI_CHROME` to point at a different Chrome binary.
+- macOS only for now (Chrome path, launchd, Keychain, notifications). Set `COSTCO_CLI_CHROME` to point at a different Chrome binary.
 
 ## Development
 

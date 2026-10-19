@@ -74,3 +74,26 @@ def test_no_drop_when_coupon_already_applied():
     ]))
     db.save_coupons(con, savings.parse(SAVINGS_HTML))
     assert prices.find_drops(con, today) == []
+
+
+def test_twilio_send(monkeypatch):
+    from costco_cli import notify
+    con = db.connect(":memory:")
+    for k, v in (("twilio_sid", "AC123"), ("twilio_from", "+15550000001"), ("twilio_to", "+15550000002"),
+                 ("notify_channel", "twilio")):
+        db.set_meta(con, k, v)
+    sent = {}
+
+    class Resp:
+        status_code = 201
+
+    def fake_post(url, auth, data, timeout):
+        sent.update(url=url, auth=auth, data=data)
+        return Resp()
+
+    monkeypatch.setattr(notify, "_token", lambda sid: "tok")
+    monkeypatch.setattr(notify.requests, "post", fake_post)
+    assert notify.send(con, "Costco price drop", "$5.00 back") == "twilio"
+    assert sent["url"].endswith("/Accounts/AC123/Messages.json")
+    assert sent["auth"] == ("AC123", "tok")
+    assert sent["data"] == {"From": "+15550000001", "To": "+15550000002", "Body": "Costco price drop: $5.00 back"}
