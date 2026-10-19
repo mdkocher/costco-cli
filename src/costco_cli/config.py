@@ -25,6 +25,14 @@ PRODUCTS_API = "https://ecom-api.costco.com/ebusiness/product/v1/products/graphq
 SAVINGS_PAGE = "https://www.costco.com/warehouse-savings.html"
 
 PRICE_ADJUST_DAYS = 30
+
+# Departments whose prices track the season or the market instead of being
+# marked down: fresh produce (65) and alcohol (16). A later receipt showing a
+# lower price there is real, but it is not a markdown Costco is likely to adjust
+# -- and the produce is already eaten. Those drops are recorded and listed by
+# `costco drops`, never texted about. Widen this set to quiet more departments:
+# 61 meat, 62 bakery, 17 dairy/deli, 19 cheese, 27 floral, 63 prepared foods.
+NO_ALERT_DEPARTMENTS = {16, 65}
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/141.0 Safari/537.36"
