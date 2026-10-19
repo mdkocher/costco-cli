@@ -1,0 +1,23 @@
+# Personal data never belongs in this repo. The CLI keeps everything in
+# ~/.local/share/costco-cli, but guard against stray copies too.
+*.db
+*.db-journal
+*.sqlite*
+purchases_*.json
+receipts_*.json
+chrome-profile/
+chrome-cdp-profile/
+spike/
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+.DS_Store

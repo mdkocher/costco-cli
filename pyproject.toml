@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "costco-cli"
+version = "0.1.0"
+description = "Track your Costco purchases and catch price adjustments from the command line"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Marc Kocher" }]
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31", "playwright>=1.45"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+costco = "costco_cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mdkocher/costco-cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
