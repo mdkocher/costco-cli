@@ -511,3 +511,133 @@ def test_a_server_that_is_down_never_fails_the_morning_sync(monkeypatch):
     started, why = cli.start_claim_runs(db.connect(":memory:"), [_FakeDrop("R1", "1707952")])
     assert started == 0
     assert "ConnectionError" in why and "connection refused" in why
+
+
+# ---------- picking a claim interactively ----------
+
+class _Drop:
+    def __init__(self, purchase_id, item_number, total, deadline, name="Thing"):
+        self.purchase_id, self.item_number = purchase_id, item_number
+        self.total, self.deadline, self.name = total, deadline, name
+        self.purchased_at = "2026-10-20T12:00:00"
+
+
+def _drops():
+    return [_Drop("R1", "1707952", 12.0, date.today() + timedelta(days=5), "Oxi Powder"),
+            _Drop("R2", "1819379", 4.0, date.today() + timedelta(days=20), "Head Gloves")]
+
+
+def test_picking_a_claim_returns_the_chosen_drop():
+    from costco_cli import cli
+    answers = iter(["2", "y"])
+    d, outcome = cli.pick_claim(_drops(), ask=lambda _: next(answers))
+    assert (d.item_number, outcome) == ("1819379", "claimed")
+
+
+def test_answering_no_records_a_skip():
+    from costco_cli import cli
+    answers = iter(["1", "n"])
+    d, outcome = cli.pick_claim(_drops(), ask=lambda _: next(answers))
+    assert (d.item_number, outcome) == ("1707952", "skipped")
+
+
+def test_pressing_enter_quits_without_settling_anything():
+    from costco_cli import cli
+    assert cli.pick_claim(_drops(), ask=lambda _: "") == (None, None)
+    answers = iter(["1", ""])          # quit at the second prompt
+    assert cli.pick_claim(_drops(), ask=lambda _: next(answers)) == (None, None)
+
+
+def test_an_out_of_range_choice_exits_rather_than_guessing():
+    from costco_cli import cli
+    with pytest.raises(SystemExit):
+        cli.pick_claim(_drops(), ask=lambda _: "9")
+
+
+def test_nothing_waiting_is_said_plainly():
+    from costco_cli import cli
+    assert cli.pick_claim([], ask=lambda _: pytest.fail("should not prompt")) == (None, None)
+
+
+# ---------- weekly heartbeat ----------
+
+def test_the_first_run_starts_the_clock_without_mailing(monkeypatch):
+    from costco_cli import cli, notify
+    con = db.connect(":memory:")
+    monkeypatch.setattr(notify, "send", lambda *a: pytest.fail("should not send"))
+    assert cli.maybe_heartbeat(con, "running") is False
+    assert db.get_meta(con, "last_heartbeat") is not None
+
+
+def test_no_heartbeat_before_a_week_has_passed(monkeypatch):
+    from costco_cli import cli, notify
+    con = db.connect(":memory:")
+    today = date(2026, 11, 5)
+    db.set_meta(con, "last_heartbeat", today.isoformat())
+    monkeypatch.setattr(notify, "send", lambda *a: pytest.fail("should not send"))
+    assert cli.maybe_heartbeat(con, "running", today=today + timedelta(days=6)) is False
+
+
+def test_a_heartbeat_after_a_week_says_what_is_going_on(monkeypatch):
+    from costco_cli import cli, notify
+    con = db.connect(":memory:")
+    today = date(2026, 11, 5)
+    db.set_meta(con, "last_heartbeat", today.isoformat())
+    db.set_meta(con, "last_sync", "2026-11-12")
+    db.record_claim(con, "R1", "1707952", 12.0, "claimed", decided_at="2026-11-10T09:00:00")
+    sent = {}
+    monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(title=t, message=m))
+    later = today + timedelta(days=7)
+    assert cli.maybe_heartbeat(con, "running", today=later) is True
+    assert "1 settled this week" in sent["message"]
+    assert "Synced through 2026-11-12" in sent["message"]
+    assert db.get_meta(con, "last_heartbeat") == later.isoformat()
+
+
+def test_a_failed_heartbeat_does_not_move_the_clock(monkeypatch):
+    """Otherwise a transient mail failure silently costs you a whole week."""
+    from costco_cli import cli, notify
+    con = db.connect(":memory:")
+    today = date(2026, 11, 5)
+    db.set_meta(con, "last_heartbeat", today.isoformat())
+
+    def boom(*a):
+        raise notify.NotifyError("smtp down")
+
+    monkeypatch.setattr(notify, "send", boom)
+    assert cli.maybe_heartbeat(con, "running", today=today + timedelta(days=8)) is False
+    assert db.get_meta(con, "last_heartbeat") == today.isoformat()
+
+
+def test_heartbeat_reports_claim_tracking_being_idle(monkeypatch):
+    from costco_cli import cli, notify
+    con = db.connect(":memory:")
+    today = date(2026, 11, 5)
+    db.set_meta(con, "last_heartbeat", today.isoformat())
+    sent = {}
+    monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(message=m))
+    cli.maybe_heartbeat(con, "ConnectionError: refused", today=today + timedelta(days=7))
+    assert "ConnectionError: refused" in sent["message"]
+
+
+# ---------- failure alerts ----------
+
+def test_a_crash_is_mailed_not_swallowed(monkeypatch):
+    from costco_cli import cli, notify
+    con = db.connect(":memory:")
+    sent = {}
+    monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(title=t, message=m))
+    cli.alert_failure(con, "daily run failed", ValueError("boom"))
+    assert sent["title"] == "costco-cli failed"
+    assert "ValueError: boom" in sent["message"]
+
+
+def test_a_failure_alert_that_itself_fails_does_not_raise(monkeypatch):
+    """The job must not die trying to report that it died."""
+    from costco_cli import cli, notify
+
+    def boom(*a):
+        raise notify.NotifyError("smtp down")
+
+    monkeypatch.setattr(notify, "send", boom)
+    cli.alert_failure(db.connect(":memory:"), "daily run failed", ValueError("boom"))

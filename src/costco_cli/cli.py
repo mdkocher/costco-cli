@@ -1,6 +1,7 @@
 """costco: track your Costco purchases and catch price adjustments."""
 import argparse
 import getpass
+import traceback
 import json
 import sys
 from datetime import date, datetime, timedelta
@@ -239,7 +240,10 @@ def notify_new_drops(con, drops):
                           for d in worth_texting[:3])
         more = f" (+{len(worth_texting) - 3} more)" if len(worth_texting) > 3 else ""
         try:
-            notify.send(con, "Costco price drop", f"{money(total)} back. {items}{more}. Run: costco drops")
+            settle = (f"costco claim {worth_texting[0].item_number}"
+                      if len(worth_texting) == 1 else "costco claim")
+            notify.send(con, "Costco price drop",
+                        f"{money(total)} back. {items}{more}. Settle it: {settle}")
         except Exception as e:
             print(f"alert failed: {e}")
             return []  # leave them un-notified so tomorrow's run retries
@@ -292,13 +296,54 @@ def start_claim_runs(con, drops):
     return started, None
 
 
+def open_claims(con):
+    """Drops you have not settled yet, soonest deadline first."""
+    settled = db.claim_outcomes(con)
+    return [d for d in prices.find_drops(con)
+            if (d.purchase_id, d.item_number) not in settled]
+
+
+def pick_claim(drops, ask=input):
+    """Ask which adjustment to settle, and how. Returns (drop, outcome) or (None, None).
+
+    This is the answer to "what is waiting on me?", which otherwise needs the
+    item number copied out of an alert. Unlike `lhctl execute userTaskRun`,
+    y/n is accepted, because the parsing is ours.
+    """
+    if not drops:
+        print("Nothing waiting on you. Price drops: costco drops")
+        return None, None
+    today = date.today()
+    print("Price adjustments waiting on you:\n")
+    for i, d in enumerate(drops, 1):
+        left = (d.deadline - today).days
+        print(f"  {i}. {money(d.total):>8}  {(d.name or d.item_number)[:34]:34} "
+              f"claim by {d.deadline} ({left}d left)")
+    choice = ask(f"\nWhich one? [1-{len(drops)}, Enter to quit] ").strip()
+    if not choice:
+        return None, None
+    if not choice.isdigit() or not 1 <= int(choice) <= len(drops):
+        sys.exit(f"Not one of the choices: {choice!r}")
+    d = drops[int(choice) - 1]
+    answer = ask(f"Did you get the {money(d.total)} back? [y/n, Enter to quit] ").strip().lower()
+    if answer in ("y", "yes"):
+        return d, "claimed"
+    if answer in ("n", "no"):
+        return d, "skipped"
+    return None, None
+
+
 def cmd_claim(args, con):
     """Settle a price adjustment: record it, and stop the nudges."""
-    matches = [d for d in prices.find_drops(con)
+    if not args.item:
+        d, outcome = pick_claim(open_claims(con))
+        if d is None:
+            return 0
+        return _settle(con, d, outcome, args.note)
+
+    matches = [d for d in open_claims(con)
                if d.item_number == args.item
                and (args.purchase is None or d.purchase_id == args.purchase)]
-    settled = db.claim_outcomes(con)
-    matches = [d for d in matches if (d.purchase_id, d.item_number) not in settled]
     if not matches:
         sys.exit(f"No open price drop for item {args.item}. See: costco drops")
     if len(matches) > 1:
@@ -306,9 +351,10 @@ def cmd_claim(args, con):
         for d in matches:
             print(f"  --purchase {d.purchase_id}   bought {day(d.purchased_at)}, {money(d.total)} back")
         return 1
+    return _settle(con, matches[0], "skipped" if args.skip else "claimed", args.note)
 
-    d = matches[0]
-    outcome = "skipped" if args.skip else "claimed"
+
+def _settle(con, d, outcome, note=None):
     db.record_claim(con, d.purchase_id, d.item_number, d.total, outcome)
     con.commit()
     print(f"{outcome.title()}: {money(d.total)} on {d.name or d.item_number}.")
@@ -318,7 +364,8 @@ def cmd_claim(args, con):
         print(f"  Nudges continue until {d.deadline}: {why}.")
         return 0
     try:
-        if lh.complete_claim(d.purchase_id, d.item_number, claimed=not args.skip, note=args.note):
+        if lh.complete_claim(d.purchase_id, d.item_number,
+                             claimed=(outcome == "claimed"), note=note):
             print("  Claim workflow closed; no more reminders.")
         else:
             print("  Nothing open on the server for it, so there was nothing to close.")
@@ -326,6 +373,52 @@ def cmd_claim(args, con):
         print(f"  Recorded locally, but could not reach LittleHorse ({e}); "
               f"reminders may continue until {d.deadline}.")
     return 0
+
+
+HEARTBEAT_DAYS = 7
+
+
+def alert_failure(con, what, exc):
+    """Mail a failure. Without this a crash is silent: you would only notice
+    weeks later that the alerts had stopped."""
+    print(f"{what}: {type(exc).__name__}: {exc}")
+    traceback.print_exc()
+    try:
+        notify.send(con, "costco-cli failed", f"{what}: {type(exc).__name__}: {exc}")
+    except Exception as e:
+        print(f"could not send the failure alert: {e}")
+
+
+def maybe_heartbeat(con, tracking, today=None):
+    """A weekly "still working" note, so silence means something.
+
+    Without it, "no price drops this week" and "the Mac never woke up" look
+    identical from your inbox. Sent on elapsed days rather than a weekday, so
+    a Mac asleep on Monday does not skip the week entirely.
+    """
+    today = today or date.today()
+    last = db.get_meta(con, "last_heartbeat")
+    if last is None:                      # first run: start the clock, say nothing
+        db.set_meta(con, "last_heartbeat", today.isoformat())
+        con.commit()
+        return False
+    if (today - date.fromisoformat(last)).days < HEARTBEAT_DAYS:
+        return False
+    since = (today - timedelta(days=HEARTBEAT_DAYS)).isoformat()
+    purchases = con.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
+    settled = con.execute("SELECT COUNT(*) FROM claims WHERE decided_at >= ?", (since,)).fetchone()[0]
+    waiting = len(open_claims(con))
+    body = (f"Synced through {db.get_meta(con, 'last_sync', 'never')}. "
+            f"{purchases} purchases tracked, {waiting} adjustment(s) waiting, "
+            f"{settled} settled this week. Claim tracking: {tracking}.")
+    try:
+        notify.send(con, "costco-cli weekly", body)
+    except Exception as e:
+        print(f"heartbeat failed: {e}")
+        return False
+    db.set_meta(con, "last_heartbeat", today.isoformat())
+    con.commit()
+    return True
 
 
 def cmd_daily(args, con):
@@ -340,15 +433,19 @@ def cmd_daily(args, con):
         except Exception as ne:
             print(f"alert failed: {ne}")
         return 1
-    drops = prices.find_drops(con)
-    fresh = notify_new_drops(con, drops)
-    quiet = [d for d in fresh if not d.alertable]
-    print(f"{len(fresh)} new price drops" + (f" ({len(quiet)} seasonal, no alert sent)" if quiet else ""))
-    started, off = start_claim_runs(con, drops)
-    if off:
-        print(f"claim tracking idle: {off}")
-    else:
-        print(f"{started} claim workflow(s) started")
+    try:
+        drops = prices.find_drops(con)
+        fresh = notify_new_drops(con, drops)
+        quiet = [d for d in fresh if not d.alertable]
+        print(f"{len(fresh)} new price drops"
+              + (f" ({len(quiet)} seasonal, no alert sent)" if quiet else ""))
+        started, off = start_claim_runs(con, drops)
+        print(f"claim tracking idle: {off}" if off else f"{started} claim workflow(s) started")
+        if maybe_heartbeat(con, off or "running"):
+            print("weekly summary sent")
+    except Exception as e:
+        alert_failure(con, "daily run failed", e)
+        return 1
     return 0
 
 
@@ -464,7 +561,7 @@ def build_parser():
     p.set_defaults(fn=cmd_returns)
 
     p = sub.add_parser("claim", help="settle a price adjustment and stop the reminders")
-    p.add_argument("item", help="item number, as shown by costco drops")
+    p.add_argument("item", nargs="?", help="item number; omit to pick from a list")
     p.add_argument("--purchase", help="receipt or order id, when the item is on more than one")
     p.add_argument("--skip", action="store_true", help="record that you passed on it")
     p.add_argument("--note", help="anything worth remembering")

@@ -92,8 +92,12 @@ def seconds_until(when, now=None):
 def _send_drop_alert(name, dollars_back, deadline, where):
     con = db.connect()
     try:
+        # No item number here: adding a parameter would change the TaskDef's
+        # signature, and TaskDefs are immutable. `costco claim` with no
+        # argument lists what is open, which is the same information.
         return notify.send(con, "Costco price drop",
-                           f"${dollars_back:.2f} back on {name}, claim by {deadline}. {where}.")
+                           f"${dollars_back:.2f} back on {name}, claim by {deadline}. "
+                           f"{where}. Settle it: costco claim")
     finally:
         con.close()
 
