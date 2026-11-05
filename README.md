@@ -16,6 +16,7 @@ $14.40 in possible price adjustments. Bring the receipt to the membership counte
 - **Syncs** warehouse receipts, gas receipts and costco.com orders (with line items and prices) into `~/.local/share/costco-cli/costco.db`.
 - **`drops`** finds things you bought in the last 30 days that are now cheaper, so you can claim Costco's price adjustment:
   - warehouse purchases vs. the current warehouse coupon book
+  - warehouse purchases vs. a later receipt of your own for the same item at the same warehouse
   - online purchases vs. today's costco.com price
 - **`item`** shows every time you bought something and what you paid.
 - **`spend`** summarizes spending by month, year, type (warehouse / online / gas), location or department.
@@ -121,7 +122,8 @@ Delete that folder (and run `costco notify macos` first if you set up email) to 
 ## Caveats
 
 - Unofficial. This uses Costco's website endpoints, which can change without notice. It only reads your own account, a few requests per sync.
-- In-store prices aren't published, so warehouse drops only cover items in the current coupon book. Gas is tracked for spending only.
+- In-store prices aren't published anywhere, so a warehouse drop is only visible two ways: the item is in the current coupon book, or you bought it again at the same warehouse for less. The costco.com price is a different price list (it carries shipping and handling, and normally runs above the warehouse price), so it is never used to judge a warehouse purchase. Gas is tracked for spending only.
+- Price drops found by comparing your own receipts are reported in `costco drops` but only texted about outside seasonal departments, where the price tracks the market rather than a markdown. See `NO_ALERT_DEPARTMENTS` in `config.py`.
 - Price adjustments are at Costco's discretion. Check the item and date before heading to the counter.
 - macOS only for now (Chrome path, launchd, Keychain, notifications). Set `COSTCO_CLI_CHROME` to point at a different Chrome binary.
 

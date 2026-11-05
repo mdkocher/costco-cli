@@ -195,7 +195,8 @@ def cmd_drops(args, con):
         print("No price drops on anything bought in the last 30 days.")
         return drops
     table([[d.deadline.isoformat(), day(d.purchased_at), d.source, d.item_number, (d.name or "")[:40],
-            qty(d.quantity), money(d.paid_unit), money(d.now_unit), money(d.total), d.reason] for d in drops],
+            qty(d.quantity), money(d.paid_unit), money(d.now_unit), money(d.total),
+            d.reason + ("" if d.alertable else " (seasonal, no text sent)")] for d in drops],
           ["Claim by", "Bought", "Type", "Item", "Name", "Qty", "Paid", "Now", "Back", "Why"], right={5, 6, 7, 8})
     total = sum(d.total for d in drops)
     print(f"\n{money(total)} in possible price adjustments. Bring the receipt to the membership counter, "
@@ -206,10 +207,12 @@ def cmd_drops(args, con):
 def notify_new_drops(con, drops):
     seen = set(json.loads(db.get_meta(con, "notified_drops", "[]")))
     fresh = [d for d in drops if d.key not in seen]
-    if fresh:
-        total = sum(d.total for d in fresh)
-        items = "; ".join(f"{(d.name or d.item_number)[:30]} {money(d.total)} by {d.deadline:%b %-d}" for d in fresh[:3])
-        more = f" (+{len(fresh) - 3} more)" if len(fresh) > 3 else ""
+    worth_texting = [d for d in fresh if d.alertable]
+    if worth_texting:
+        total = sum(d.total for d in worth_texting)
+        items = "; ".join(f"{(d.name or d.item_number)[:30]} {money(d.total)} by {d.deadline:%b %-d}"
+                          for d in worth_texting[:3])
+        more = f" (+{len(worth_texting) - 3} more)" if len(worth_texting) > 3 else ""
         try:
             notify.send(con, "Costco price drop", f"{money(total)} back. {items}{more}. Run: costco drops")
         except Exception as e:
@@ -234,7 +237,8 @@ def cmd_daily(args, con):
             print(f"alert failed: {ne}")
         return 1
     fresh = notify_new_drops(con, prices.find_drops(con))
-    print(f"{len(fresh)} new price drops")
+    quiet = [d for d in fresh if not d.alertable]
+    print(f"{len(fresh)} new price drops" + (f" ({len(quiet)} seasonal, not texted)" if quiet else ""))
     return 0
 
 
