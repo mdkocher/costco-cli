@@ -190,3 +190,16 @@ def test_wait_until_ready_does_not_mask_a_real_failure(monkeypatch):
     stub = _FakeStub(unavailable_times=1, code=grpc.StatusCode.PERMISSION_DENIED)
     with pytest.raises(_FakeRpcError):
         lh.wait_until_ready(_FakeConfig(stub), poll=0)
+
+
+def test_the_delay_variables_have_defaults():
+    """A run started by hand (the dashboard's Run button) passes no variables.
+    An unset INT fails the User Task node with "Delay for User Task Action was
+    not an INT, got a DEFINEDTYPE_NOT_SET" before the task is even created."""
+    assert lh.DEFAULT_FIRST_NUDGE_SECONDS < lh.DEFAULT_FINAL_NUDGE_SECONDS
+    assert lh.DEFAULT_FINAL_NUDGE_SECONDS < lh.DEFAULT_EXPIRES_IN_SECONDS
+
+
+def test_the_defaults_match_the_real_adjustment_window():
+    from costco_cli import config
+    assert lh.DEFAULT_EXPIRES_IN_SECONDS == config.PRICE_ADJUST_DAYS * 24 * 60 * 60

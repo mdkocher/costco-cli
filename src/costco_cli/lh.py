@@ -49,6 +49,12 @@ WHERE_ONLINE = "Use costco.com chat for online orders"
 FIRST_NUDGE_DAYS_LEFT = 7
 FINAL_NUDGE_DAYS_LEFT = 1
 
+# Fallbacks for a run started by hand, i.e. as if bought today.
+_DAY = 24 * 60 * 60
+DEFAULT_EXPIRES_IN_SECONDS = 30 * _DAY
+DEFAULT_FIRST_NUDGE_SECONDS = (30 - FIRST_NUDGE_DAYS_LEFT) * _DAY
+DEFAULT_FINAL_NUDGE_SECONDS = (30 - FINAL_NUDGE_DAYS_LEFT) * _DAY
+
 
 # ---------- run identity (decision 1A) ----------
 
@@ -136,9 +142,18 @@ def claim_workflow(thread):
     dollars_back = thread.add_variable("dollars_back", VariableType.DOUBLE)
     deadline = thread.add_variable("deadline", VariableType.STR)
     where = thread.add_variable("where", VariableType.STR)
-    first_nudge = thread.add_variable("first_nudge_seconds", VariableType.INT)
-    final_nudge = thread.add_variable("final_nudge_seconds", VariableType.INT)
-    expires_in = thread.add_variable("expires_in_seconds", VariableType.INT)
+    # Defaults matter: these feed schedule_reminder_task and
+    # cancel_user_task_run_after, and an unset INT fails the node outright with
+    # "Delay for User Task Action was not an INT, got a DEFINEDTYPE_NOT_SET"
+    # before the User Task is even created. ensure_run() always supplies real
+    # values; these keep a run started by hand (the dashboard's Run button)
+    # working, using the timings of a purchase made today.
+    first_nudge = thread.add_variable("first_nudge_seconds", VariableType.INT,
+                                      default_value=DEFAULT_FIRST_NUDGE_SECONDS)
+    final_nudge = thread.add_variable("final_nudge_seconds", VariableType.INT,
+                                      default_value=DEFAULT_FINAL_NUDGE_SECONDS)
+    expires_in = thread.add_variable("expires_in_seconds", VariableType.INT,
+                                     default_value=DEFAULT_EXPIRES_IN_SECONDS)
 
     # PUBLIC_VAR so the failure-handler thread can set it on the parent.
     # INHERITED_VAR is rejected here -- that access level is only for child
