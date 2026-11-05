@@ -559,39 +559,39 @@ def test_nothing_waiting_is_said_plainly():
     assert cli.pick_claim([], ask=lambda _: pytest.fail("should not prompt")) == (None, None)
 
 
-# ---------- weekly heartbeat ----------
+# ---------- periodic summary ----------
 
 def test_the_first_run_starts_the_clock_without_mailing(monkeypatch):
     from costco_cli import cli, notify
     con = db.connect(":memory:")
     monkeypatch.setattr(notify, "send", lambda *a: pytest.fail("should not send"))
-    assert cli.maybe_heartbeat(con, "running") is False
-    assert db.get_meta(con, "last_heartbeat") is not None
+    assert cli.maybe_summary(con, "running") is False
+    assert db.get_meta(con, "last_summary") is not None
 
 
 def test_no_heartbeat_before_a_week_has_passed(monkeypatch):
     from costco_cli import cli, notify
     con = db.connect(":memory:")
     today = date(2026, 11, 5)
-    db.set_meta(con, "last_heartbeat", today.isoformat())
+    db.set_meta(con, "last_summary", today.isoformat())
     monkeypatch.setattr(notify, "send", lambda *a: pytest.fail("should not send"))
-    assert cli.maybe_heartbeat(con, "running", today=today + timedelta(days=6)) is False
+    assert cli.maybe_summary(con, "running", today=today + timedelta(days=6)) is False
 
 
 def test_a_heartbeat_after_a_week_says_what_is_going_on(monkeypatch):
     from costco_cli import cli, notify
     con = db.connect(":memory:")
     today = date(2026, 11, 5)
-    db.set_meta(con, "last_heartbeat", today.isoformat())
+    db.set_meta(con, "last_summary", today.isoformat())
     db.set_meta(con, "last_sync", "2026-11-12")
     db.record_claim(con, "R1", "1707952", 12.0, "claimed", decided_at="2026-11-10T09:00:00")
     sent = {}
     monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(title=t, message=m))
     later = today + timedelta(days=7)
-    assert cli.maybe_heartbeat(con, "running", today=later) is True
-    assert "1 settled this week" in sent["message"]
-    assert "Synced through 2026-11-12" in sent["message"]
-    assert db.get_meta(con, "last_heartbeat") == later.isoformat()
+    assert cli.maybe_summary(con, "running", today=later) is True
+    assert "1 claimed" in sent["message"]
+    assert "last run 2026-11-12" in sent["message"]
+    assert db.get_meta(con, "last_summary") == later.isoformat()
 
 
 def test_a_failed_heartbeat_does_not_move_the_clock(monkeypatch):
@@ -599,24 +599,24 @@ def test_a_failed_heartbeat_does_not_move_the_clock(monkeypatch):
     from costco_cli import cli, notify
     con = db.connect(":memory:")
     today = date(2026, 11, 5)
-    db.set_meta(con, "last_heartbeat", today.isoformat())
+    db.set_meta(con, "last_summary", today.isoformat())
 
     def boom(*a):
         raise notify.NotifyError("smtp down")
 
     monkeypatch.setattr(notify, "send", boom)
-    assert cli.maybe_heartbeat(con, "running", today=today + timedelta(days=8)) is False
-    assert db.get_meta(con, "last_heartbeat") == today.isoformat()
+    assert cli.maybe_summary(con, "running", today=today + timedelta(days=8)) is False
+    assert db.get_meta(con, "last_summary") == today.isoformat()
 
 
 def test_heartbeat_reports_claim_tracking_being_idle(monkeypatch):
     from costco_cli import cli, notify
     con = db.connect(":memory:")
     today = date(2026, 11, 5)
-    db.set_meta(con, "last_heartbeat", today.isoformat())
+    db.set_meta(con, "last_summary", today.isoformat())
     sent = {}
     monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(message=m))
-    cli.maybe_heartbeat(con, "ConnectionError: refused", today=today + timedelta(days=7))
+    cli.maybe_summary(con, "ConnectionError: refused", today=today + timedelta(days=7))
     assert "ConnectionError: refused" in sent["message"]
 
 
@@ -641,3 +641,104 @@ def test_a_failure_alert_that_itself_fails_does_not_raise(monkeypatch):
 
     monkeypatch.setattr(notify, "send", boom)
     cli.alert_failure(db.connect(":memory:"), "daily run failed", ValueError("boom"))
+
+
+# ---------- summary content and cadence ----------
+
+def _summary_con():
+    con = db.connect(":memory:")
+    today = date.today()
+    bought = (today - timedelta(days=3)).isoformat() + "T12:00:00"
+    db.save_warehouse_receipt(con, receipt(bought, [line("1707952", "KSOXIPOWDER", 4, 59.96)], "R1"))
+    db.save_coupons(con, [{"item_number": "1707952", "valid_from": today.isoformat(),
+                           "valid_to": (today + timedelta(days=10)).isoformat(),
+                           "discount": 3.0, "price_after": 11.99, "name": "Kirkland Oxi"}])
+    db.set_meta(con, "last_sync", today.isoformat())
+    return con, today
+
+
+def test_the_summary_shows_what_is_waiting_with_its_deadline():
+    from costco_cli import cli
+    con, today = _summary_con()
+    text = cli.summary_text(con, "running", today=today, days=7)
+    assert "Waiting   1 adjustment(s)" in text
+    assert "KSOXIPOWDER" in text
+    assert "Settle an adjustment: costco claim" in text
+
+
+def test_the_summary_reports_purchases_and_tracking():
+    from costco_cli import cli
+    con, today = _summary_con()
+    text = cli.summary_text(con, "idle: server down", today=today, days=7)
+    assert "1 receipts" in text and "1 warehouse" in text
+    assert "Tracking  idle: server down" in text
+
+
+def test_the_summary_surfaces_refunds_which_nothing_else_shows():
+    from costco_cli import cli
+    con, today = _summary_con()
+    when = (today - timedelta(days=2)).isoformat() + "T12:00:00"
+    r = receipt(when, [line("1949384", "CHEFMAN", -1, -49.99)], "REF1")
+    r["transactionType"] = "Refund"
+    db.save_warehouse_receipt(con, r)
+    text = cli.summary_text(con, "running", today=today, days=7)
+    assert "Refunds   1" in text
+    assert "-$49.99" in text
+
+
+def test_an_empty_week_still_reads_sensibly():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    text = cli.summary_text(con, "running", today=date(2026, 11, 5), days=7)
+    for expected in ("Bought    nothing", "Waiting   nothing to claim",
+                     "Settled   nothing this period", "Refunds   none"):
+        assert expected in text, expected
+
+
+def test_the_interval_is_configurable():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    assert cli.summary_interval(con) == cli.DEFAULT_SUMMARY_DAYS
+    db.set_meta(con, "summary_days", "1")
+    assert cli.summary_interval(con) == 1
+
+
+def test_a_nonsense_interval_falls_back_to_the_default():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.set_meta(con, "summary_days", "every tuesday")
+    assert cli.summary_interval(con) == cli.DEFAULT_SUMMARY_DAYS
+
+
+def test_summaries_can_be_turned_off(monkeypatch):
+    from costco_cli import cli, notify
+    con = db.connect(":memory:")
+    db.set_meta(con, "summary_days", "0")
+    db.set_meta(con, "last_summary", "2020-01-01")
+    monkeypatch.setattr(notify, "send", lambda *a: pytest.fail("should not send"))
+    assert cli.maybe_summary(con, "running") is False
+
+
+def test_a_daily_interval_sends_the_next_day(monkeypatch):
+    from costco_cli import cli, notify
+    con, today = _summary_con()
+    db.set_meta(con, "summary_days", "1")
+    db.set_meta(con, "last_summary", today.isoformat())
+    sent = {}
+    monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(message=m))
+    assert cli.maybe_summary(con, "running", today=today + timedelta(days=1)) is True
+    assert "Costco summary, 1 days" in sent["message"]
+
+
+def test_refunds_are_not_counted_as_purchases():
+    """A refund receipt would otherwise inflate the receipt count and net its
+    negative total into what you spent."""
+    from costco_cli import cli
+    con, today = _summary_con()
+    r = receipt((today - timedelta(days=2)).isoformat() + "T12:00:00",
+                [line("1949384", "CHEFMAN", -1, -49.99)], "REF1")
+    r["transactionType"] = "Refund"
+    db.save_warehouse_receipt(con, r)
+    text = cli.summary_text(con, "running", today=today, days=7)
+    assert "Bought    1 receipts, $59.96" in text     # the refund is excluded
+    assert "Refunds   1" in text                      # and reported on its own

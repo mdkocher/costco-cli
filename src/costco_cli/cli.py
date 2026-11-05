@@ -375,7 +375,70 @@ def _settle(con, d, outcome, note=None):
     return 0
 
 
-HEARTBEAT_DAYS = 7
+DEFAULT_SUMMARY_DAYS = 7
+
+
+def summary_interval(con):
+    """How often the summary goes out, in days. 0 means never."""
+    try:
+        return int(db.get_meta(con, "summary_days", str(DEFAULT_SUMMARY_DAYS)))
+    except ValueError:
+        return DEFAULT_SUMMARY_DAYS
+
+
+def summary_text(con, tracking, today=None, days=None):
+    """What has happened lately, in one readable block.
+
+    Everything here is already in the database; the point is that none of it
+    was visible without writing SQL by hand.
+    """
+    today = today or date.today()
+    days = days or DEFAULT_SUMMARY_DAYS
+    since = (today - timedelta(days=days)).isoformat()
+
+    # Refunds are reported separately below; counting them here would both
+    # inflate the receipt count and net their negative total into what you spent.
+    bought = con.execute("SELECT source, COUNT(*) n, COALESCE(SUM(total), 0) t FROM purchases"
+                         " WHERE purchased_at >= ?"
+                         "   AND (transaction_type IS NULL OR transaction_type != 'Refund')"
+                         " GROUP BY source ORDER BY n DESC", (since,)).fetchall()
+    settled = con.execute("SELECT outcome, COUNT(*) n, COALESCE(SUM(amount), 0) t FROM claims"
+                          " WHERE decided_at >= ? GROUP BY outcome", (since,)).fetchall()
+    refunds = con.execute(
+        "SELECT p.purchased_at, l.amount, COALESCE(i.name, l.description) nm"
+        " FROM lines l JOIN purchases p ON p.id = l.purchase_id"
+        " LEFT JOIN items i ON i.item_number = l.item_number"
+        " WHERE p.transaction_type = 'Refund' AND p.purchased_at >= ?"
+        " ORDER BY p.purchased_at DESC", (since,)).fetchall()
+    waiting = open_claims(con)
+    tracked = con.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
+
+    out = [f"Costco summary, {days} days to {today.isoformat()}", ""]
+    out.append(f"Sync      last run {db.get_meta(con, 'last_sync', 'never')}, {tracked} purchases tracked")
+    if bought:
+        kinds = ", ".join(f"{r['n']} {r['source']}" for r in bought)
+        out.append(f"Bought    {sum(r['n'] for r in bought)} receipts, "
+                   f"{money(sum(r['t'] or 0 for r in bought))} ({kinds})")
+    else:
+        out.append("Bought    nothing")
+    if waiting:
+        out.append(f"Waiting   {len(waiting)} adjustment(s), {money(sum(d.total for d in waiting))}")
+        for d in waiting:
+            out.append(f"            {money(d.total):>8}  {(d.name or d.item_number)[:30]:30}"
+                       f"  by {d.deadline} ({(d.deadline - today).days}d)")
+    else:
+        out.append("Waiting   nothing to claim")
+    out.append("Settled   " + (", ".join(f"{r['n']} {r['outcome']} {money(r['t'])}" for r in settled)
+                               or "nothing this period"))
+    if refunds:
+        out.append(f"Refunds   {len(refunds)}")
+        for r in refunds:
+            out.append(f"            {money(r['amount']):>9}  {str(r['nm'])[:30]:30}  {r['purchased_at'][:10]}")
+    else:
+        out.append("Refunds   none")
+    out.append(f"Tracking  {tracking}")
+    out += ["", "Settle an adjustment: costco claim"]
+    return "\n".join(out)
 
 
 def alert_failure(con, what, exc):
@@ -389,34 +452,30 @@ def alert_failure(con, what, exc):
         print(f"could not send the failure alert: {e}")
 
 
-def maybe_heartbeat(con, tracking, today=None):
-    """A weekly "still working" note, so silence means something.
+def maybe_summary(con, tracking, today=None):
+    """Send the periodic summary if one is due.
 
-    Without it, "no price drops this week" and "the Mac never woke up" look
-    identical from your inbox. Sent on elapsed days rather than a weekday, so
-    a Mac asleep on Monday does not skip the week entirely.
+    On elapsed days rather than a weekday, so a Mac asleep on Monday does not
+    skip the period. A send that fails deliberately does not move the clock --
+    one flaky SMTP moment would otherwise cost a whole period of coverage.
     """
     today = today or date.today()
-    last = db.get_meta(con, "last_heartbeat")
+    days = summary_interval(con)
+    if days <= 0:
+        return False
+    last = db.get_meta(con, "last_summary")
     if last is None:                      # first run: start the clock, say nothing
-        db.set_meta(con, "last_heartbeat", today.isoformat())
+        db.set_meta(con, "last_summary", today.isoformat())
         con.commit()
         return False
-    if (today - date.fromisoformat(last)).days < HEARTBEAT_DAYS:
+    if (today - date.fromisoformat(last)).days < days:
         return False
-    since = (today - timedelta(days=HEARTBEAT_DAYS)).isoformat()
-    purchases = con.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
-    settled = con.execute("SELECT COUNT(*) FROM claims WHERE decided_at >= ?", (since,)).fetchone()[0]
-    waiting = len(open_claims(con))
-    body = (f"Synced through {db.get_meta(con, 'last_sync', 'never')}. "
-            f"{purchases} purchases tracked, {waiting} adjustment(s) waiting, "
-            f"{settled} settled this week. Claim tracking: {tracking}.")
     try:
-        notify.send(con, "costco-cli weekly", body)
+        notify.send(con, "Costco summary", summary_text(con, tracking, today, days))
     except Exception as e:
-        print(f"heartbeat failed: {e}")
+        print(f"summary failed: {e}")
         return False
-    db.set_meta(con, "last_heartbeat", today.isoformat())
+    db.set_meta(con, "last_summary", today.isoformat())
     con.commit()
     return True
 
@@ -441,8 +500,8 @@ def cmd_daily(args, con):
               + (f" ({len(quiet)} seasonal, no alert sent)" if quiet else ""))
         started, off = start_claim_runs(con, drops)
         print(f"claim tracking idle: {off}" if off else f"{started} claim workflow(s) started")
-        if maybe_heartbeat(con, off or "running"):
-            print("weekly summary sent")
+        if maybe_summary(con, off or "running"):
+            print("summary sent")
     except Exception as e:
         alert_failure(con, "daily run failed", e)
         return 1
@@ -487,6 +546,21 @@ def cmd_notify(args, con):
               "Sending a test message...")
         notify.send(con, "costco-cli", "Email alerts are set up.")
         print("Sent.")
+    elif args.action == "summary":
+        if args.off:
+            db.set_meta(con, "summary_days", "0")
+            con.commit()
+            print("Summary emails off.")
+        elif args.days is not None:
+            if args.days < 1:
+                sys.exit("--days must be 1 or more; use --off to stop them.")
+            db.set_meta(con, "summary_days", str(args.days))
+            con.commit()
+            print(f"Summary every {args.days} day(s).")
+        else:
+            every = summary_interval(con)
+            print(f"Emailed every {every} day(s).\n" if every else "Summary emails are off.\n")
+            print(summary_text(con, "(not checked)", days=every or DEFAULT_SUMMARY_DAYS))
     elif args.action == "test":
         used = notify.send(con, "costco-cli", "Test alert.")
         print(f"Sent via {used}.")
@@ -582,7 +656,10 @@ def build_parser():
     p.set_defaults(fn=cmd_coupons)
 
     p = sub.add_parser("notify", help="where alerts go: macOS notifications or email")
-    p.add_argument("action", choices=["status", "email", "test", "macos"], nargs="?", default="status")
+    p.add_argument("action", choices=["status", "email", "summary", "test", "macos"],
+                   nargs="?", default="status")
+    p.add_argument("--days", type=int, help="summary: send one every N days")
+    p.add_argument("--off", action="store_true", help="summary: stop sending them")
     p.set_defaults(fn=cmd_notify)
 
     p = sub.add_parser("schedule", help="run sync + drop alerts daily in the background")

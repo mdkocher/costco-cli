@@ -65,7 +65,7 @@ costco schedule install   # daily sync + notifications at 07:00
 | `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
 | `costco claim [item] [--skip] [--purchase ID] [--note ...]` | Settle a price adjustment; omit the item to pick from a list. |
 | `costco claims [--limit N]` | Adjustments you have already settled. |
-| `costco notify [status\|email\|test\|macos]` | Choose where alerts go. |
+| `costco notify [status\|email\|summary\|test\|macos]` | Where alerts go; `summary` previews or schedules the digest. |
 
 ## Alerts
 
@@ -91,10 +91,30 @@ nothing:
 
 - **If a run fails** — a crash, or an unreachable LittleHorse server — it mails
   you rather than dying quietly in the log.
-- **Once a week** it reports in: how far the sync has got, how many adjustments
-  are waiting, how many you settled, and whether claim tracking is running. It
-  goes on elapsed days rather than a fixed weekday, so a Mac asleep on Monday
-  does not skip the week.
+- **A periodic summary** — weekly by default — of what has actually happened:
+
+  ```
+  Costco summary, 7 days to 2026-11-05
+
+  Sync      last run 2026-11-05, 144 purchases tracked
+  Bought    3 receipts, $76.95 (2 warehouse, 1 gas)
+  Waiting   2 adjustment(s), $16.00
+               $12.00  Kirkland Oxi Powder     by 2026-11-25 (20d)
+                $4.00  Head Gloves             by 2026-12-02 (27d)
+  Settled   1 claimed $12.00
+  Refunds   none
+  Tracking  running
+  ```
+
+  It goes on elapsed days rather than a fixed weekday, so a Mac asleep on
+  Monday does not skip the period. Read it without waiting, or change how
+  often it arrives:
+
+  ```bash
+  costco notify summary            # print it now
+  costco notify summary --days 1   # every morning instead
+  costco notify summary --off
+  ```
 
 So no mail between one weekly note and the next means something is wrong,
 rather than just a quiet month at Costco.
