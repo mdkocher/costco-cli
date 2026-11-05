@@ -1,16 +1,26 @@
-"""Where alerts go: macOS notifications (default) or SMS via Twilio.
+"""Where alerts go: macOS notifications (default) or email.
 
-Twilio's auth token is kept in the macOS Keychain, never in the database or
-any file. The account SID and phone numbers are stored in the local database.
+The sending account's app password is kept in the macOS Keychain, never in the
+database or any file. The addresses and SMTP settings are stored in the local
+database.
 """
+import re
+import smtplib
 import subprocess
-
-import requests
+from email.message import EmailMessage
 
 from . import db
 
-KEYCHAIN_SERVICE = "costco-cli-twilio"
-TWILIO_API = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+KEYCHAIN_SERVICE = "costco-cli-email"
+DEFAULT_SMTP_HOST = "smtp.gmail.com"
+DEFAULT_SMTP_PORT = 465
+EMAIL_KEYS = ("email_from", "email_to", "smtp_host", "smtp_port")
+
+# Settings left behind by the Twilio SMS alerts that costco-cli used to support.
+LEGACY_KEYCHAIN_SERVICE = "costco-cli-twilio"
+LEGACY_KEYS = ("twilio_sid", "twilio_from", "twilio_to")
+
+ADDRESS_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
 class NotifyError(Exception):
@@ -24,48 +34,67 @@ def _macos(title, message):
                    check=False, capture_output=True)
 
 
-def save_token(sid, token):
-    # Twilio SIDs and tokens are alphanumeric; checking keeps the stdin command below unambiguous.
-    if not (sid.isalnum() and token.isalnum()):
-        raise NotifyError("Account SID and auth token should be letters and digits only.")
-    # Sent over stdin via `security -i` so the token never appears in the process list.
-    r = subprocess.run(["security", "-i"], input=f"add-generic-password -U -s {KEYCHAIN_SERVICE} -a {sid} -w {token}\n",
+def save_password(address, password):
+    """Store the app password in the login Keychain, keyed by sending address."""
+    # Gmail displays app passwords in groups of four, so accept the spaced form.
+    password = password.replace(" ", "")
+    if not ADDRESS_RE.match(address):
+        raise NotifyError(f"{address!r} does not look like an email address.")
+    # App passwords are alphanumeric; checking keeps the stdin command below unambiguous.
+    if not password.isalnum():
+        raise NotifyError("An app password should be letters and digits only.")
+    # Sent over stdin via `security -i` so the password never appears in the process list.
+    r = subprocess.run(["security", "-i"],
+                       input=f"add-generic-password -U -s {KEYCHAIN_SERVICE} -a {address} -w {password}\n",
                        capture_output=True, text=True)
     if r.returncode != 0 or "error" in (r.stderr + r.stdout).lower():
-        raise NotifyError("Could not save the token to Keychain.")
+        raise NotifyError("Could not save the app password to Keychain.")
 
 
-def _token(sid):
-    r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", sid, "-w"],
+def _password(address):
+    r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", address, "-w"],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        raise NotifyError("Twilio auth token not found in Keychain. Run: costco notify twilio")
+        raise NotifyError("Email app password not found in Keychain. Run: costco notify email")
     return r.stdout.strip()
 
 
-def delete_token(sid):
-    subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", sid],
+def delete_password(address):
+    subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", address],
                    check=False, capture_output=True)
 
 
-def twilio_settings(con):
-    keys = ("twilio_sid", "twilio_from", "twilio_to")
-    vals = [db.get_meta(con, k) for k in keys]
-    return dict(zip(("sid", "from", "to"), vals)) if all(vals) else None
+def email_settings(con):
+    """The configured email settings, or None if email is not set up."""
+    vals = {k: db.get_meta(con, k) for k in EMAIL_KEYS}
+    if not (vals["email_from"] and vals["email_to"]):
+        return None
+    vals["smtp_host"] = vals["smtp_host"] or DEFAULT_SMTP_HOST
+    try:
+        vals["smtp_port"] = int(vals["smtp_port"] or DEFAULT_SMTP_PORT)
+    except ValueError:
+        raise NotifyError(f"smtp_port is not a number: {vals['smtp_port']!r}. Run: costco notify email")
+    return vals
 
 
-def _twilio(con, title, message):
-    s = twilio_settings(con)
+def _email(con, title, message):
+    s = email_settings(con)
     if not s:
-        raise NotifyError("Twilio is not set up. Run: costco notify twilio")
-    r = requests.post(TWILIO_API.format(sid=s["sid"]), auth=(s["sid"], _token(s["sid"])),
-                      data={"From": s["from"], "To": s["to"], "Body": f"{title}: {message}"}, timeout=20)
-    if r.status_code >= 300:
-        try:
-            detail = r.json().get("message")
-        except ValueError:
-            detail = r.text[:200]
-        raise NotifyError(f"Twilio returned HTTP {r.status_code}: {detail}")
+        raise NotifyError("Email is not set up. Run: costco notify email")
+    msg = EmailMessage()
+    msg["Subject"] = title
+    msg["From"] = s["email_from"]
+    msg["To"] = s["email_to"]
+    msg.set_content(message)
+    password = _password(s["email_from"])
+    try:
+        with smtplib.SMTP_SSL(s["smtp_host"], s["smtp_port"], timeout=20) as server:
+            server.login(s["email_from"], password)
+            server.send_message(msg)
+    except smtplib.SMTPAuthenticationError as e:
+        raise NotifyError("The mail server rejected the app password. Run: costco notify email") from e
+    except (smtplib.SMTPException, OSError) as e:
+        raise NotifyError(f"Could not send mail: {e}") from e
 
 
 def channel(con):
@@ -74,13 +103,36 @@ def channel(con):
 
 def send(con, title, message):
     """Send an alert on the configured channel. Falls back to a macOS
-    notification if SMS fails, so an alert is never silently lost."""
-    if channel(con) == "twilio":
+    notification if email fails, so an alert is never silently lost."""
+    if channel(con) == "email":
         try:
-            _twilio(con, title, message)
-            return "twilio"
-        except (NotifyError, requests.RequestException) as e:
-            _macos(title, f"{message} (SMS failed: {e})")
+            _email(con, title, message)
+            return "email"
+        except NotifyError as e:
+            _macos(title, f"{message} (email failed: {e})")
             raise
     _macos(title, message)
     return "macos"
+
+
+def migrate_legacy_channel(con):
+    """Clear settings left over from the Twilio SMS alerts that were removed.
+
+    Switches the channel back to macOS notifications and deletes the orphaned
+    Keychain item, so no live credential is left behind. Returns True if
+    anything was cleaned up, so the caller can mention it once.
+    """
+    sid = db.get_meta(con, "twilio_sid")
+    stale = [k for k in LEGACY_KEYS if db.get_meta(con, k) is not None]
+    was_sms = channel(con) == "twilio"
+    if not stale and not was_sms:
+        return False
+    if sid:
+        subprocess.run(["security", "delete-generic-password", "-s", LEGACY_KEYCHAIN_SERVICE, "-a", sid],
+                       check=False, capture_output=True)
+    for key in stale:
+        con.execute("DELETE FROM meta WHERE key = ?", (key,))
+    if was_sms:
+        db.set_meta(con, "notify_channel", "macos")
+    con.commit()
+    return True

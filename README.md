@@ -21,7 +21,7 @@ $14.40 in possible price adjustments. Bring the receipt to the membership counte
 - **`spend`** summarizes spending by month, year, type (warehouse / online / gas), location or department.
 - **`returns`** lists items still inside the price-adjustment (30 day) or electronics return (90 day) window.
 - **`coupons`** shows the current coupon book, or just the items you've bought before (`--mine`).
-- **`schedule`** runs a sync every morning and alerts you when there is money to claim, by macOS notification or SMS (Twilio).
+- **`schedule`** runs a sync every morning and alerts you when there is money to claim, by macOS notification or email.
 
 ## Install
 
@@ -61,38 +61,40 @@ costco schedule install   # daily sync + notifications at 07:00
 | `costco drops` | Price drops you can claim. |
 | `costco coupons [search] [--mine]` | Current warehouse coupon book. |
 | `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
-| `costco notify [status\|twilio\|test\|macos]` | Choose where alerts go. |
+| `costco notify [status\|email\|test\|macos]` | Choose where alerts go. |
 
 ## Alerts
 
-By default alerts are macOS notifications on the machine running the schedule. To get them as text messages instead:
+By default alerts are macOS notifications on the machine running the schedule. That only reaches you at that Mac, so to get them by email as well:
 
 ```bash
-costco notify twilio   # prompts for Account SID, from/to numbers, and auth token (hidden)
-# step-by-step Twilio signup: docs/SETUP.md#4-set-up-text-alerts-with-twilio
+costco notify email   # prompts for the addresses, SMTP host/port, and an app password (hidden)
+# step-by-step walkthrough: docs/SETUP.md#4-set-up-email-alerts
 costco notify test
 ```
 
-The Twilio auth token is stored in the macOS Keychain (service `costco-cli-twilio`), never in a file. The SID and phone numbers go in the local database. `costco notify macos` switches back and deletes the Keychain entry.
+The app password is stored in the macOS Keychain (service `costco-cli-email`), never in a file. The addresses and SMTP settings go in the local database. `costco notify macos` switches back and deletes the Keychain entry.
 
-Twilio notes: a trial account can only text numbers you've verified and adds a trial prefix. US numbers need A2P 10DLC registration (or a verified toll-free number) before carriers will deliver messages reliably.
+Gmail needs an [app password](https://myaccount.google.com/apppasswords) rather than your account password, and that requires two-step verification. Any SMTP server over implicit TLS works; the defaults are `smtp.gmail.com:465`.
 
-You get a text when new price drops show up, and when the saved Costco sign-in has expired.
+If sending mail fails, the alert still appears as a macOS notification, so it is never silently lost.
+
+You get an alert when new price drops show up, and when the saved Costco sign-in has expired.
 
 ## Running on an always-on Mac
 
-Full walkthrough, including Twilio signup and troubleshooting: **[docs/SETUP.md](docs/SETUP.md)**.
+Full walkthrough, including email setup and troubleshooting: **[docs/SETUP.md](docs/SETUP.md)**.
 
 Short version:
 
 1. Install Google Chrome and Python 3 (`brew install python pipx`).
 2. `pipx install git+https://github.com/mdkocher/costco-cli`
 3. `costco login`. This needs the Mac's screen; Screen Sharing from another Mac works.
-4. `costco notify twilio`
+4. `costco notify email`
 5. `costco schedule install --time 07:00`
 6. Keep it from sleeping (System Settings > Energy > Prevent automatic sleeping). launchd also runs a missed job when the Mac wakes.
 
-The job runs as a LaunchAgent, so your user needs to be logged in (after a restart, log in once). When the Costco sign-in eventually expires you'll get a text; connect with Screen Sharing and run `costco login`.
+The job runs as a LaunchAgent, so your user needs to be logged in (after a restart, log in once). When the Costco sign-in eventually expires you'll get an alert; connect with Screen Sharing and run `costco login`.
 
 ## How it works
 
@@ -112,9 +114,9 @@ chrome-profile/   the Chrome profile holding your Costco sign-in
 logs/daily.log    output of the scheduled job
 ```
 
-Plus, if you use SMS alerts, one Keychain item named `costco-cli-twilio`.
+Plus, if you use email alerts, one Keychain item named `costco-cli-email`.
 
-Delete that folder (and run `costco notify macos` first if you set up SMS) to remove everything.
+Delete that folder (and run `costco notify macos` first if you set up email) to remove everything.
 
 ## Caveats
 

@@ -1,6 +1,8 @@
 from datetime import date, timedelta
 
-from costco_cli import db, prices, savings
+import pytest
+
+from costco_cli import db, notify, prices, savings
 
 SAVINGS_HTML = """
 <div>Pricing shown is warehouse pricing</div><div>Valid 10/19/26 - 11/15/26</div>
@@ -76,24 +78,130 @@ def test_no_drop_when_coupon_already_applied():
     assert prices.find_drops(con, today) == []
 
 
-def test_twilio_send(monkeypatch):
-    from costco_cli import notify
+class _FakeSMTP:
+    """Stands in for smtplib.SMTP_SSL, recording what a send would have done."""
+
+    log = {}
+
+    def __init__(self, host, port, timeout=None):
+        _FakeSMTP.log.update(host=host, port=port, timeout=timeout)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def login(self, user, password):
+        _FakeSMTP.log.update(user=user, password=password)
+
+    def send_message(self, msg):
+        _FakeSMTP.log.update(msg=msg)
+
+
+def _email_con(**overrides):
     con = db.connect(":memory:")
-    for k, v in (("twilio_sid", "AC123"), ("twilio_from", "+15550000001"), ("twilio_to", "+15550000002"),
-                 ("notify_channel", "twilio")):
+    settings = {"email_from": "me@example.com", "email_to": "you@example.com", "notify_channel": "email"}
+    settings.update(overrides)
+    for k, v in settings.items():
         db.set_meta(con, k, v)
-    sent = {}
+    return con
 
-    class Resp:
-        status_code = 201
 
-    def fake_post(url, auth, data, timeout):
-        sent.update(url=url, auth=auth, data=data)
-        return Resp()
+def test_macos_is_the_default_channel():
+    assert notify.channel(db.connect(":memory:")) == "macos"
 
-    monkeypatch.setattr(notify, "_token", lambda sid: "tok")
-    monkeypatch.setattr(notify.requests, "post", fake_post)
-    assert notify.send(con, "Costco price drop", "$5.00 back") == "twilio"
-    assert sent["url"].endswith("/Accounts/AC123/Messages.json")
-    assert sent["auth"] == ("AC123", "tok")
-    assert sent["data"] == {"From": "+15550000001", "To": "+15550000002", "Body": "Costco price drop: $5.00 back"}
+
+def test_email_send(monkeypatch):
+    con = _email_con()
+    _FakeSMTP.log.clear()
+    monkeypatch.setattr(notify, "_password", lambda address: "apppw")
+    monkeypatch.setattr(notify.smtplib, "SMTP_SSL", _FakeSMTP)
+
+    assert notify.send(con, "Costco price drop", "$5.00 back") == "email"
+    log = _FakeSMTP.log
+    assert (log["host"], log["port"]) == (notify.DEFAULT_SMTP_HOST, notify.DEFAULT_SMTP_PORT)
+    assert (log["user"], log["password"]) == ("me@example.com", "apppw")
+    assert log["msg"]["Subject"] == "Costco price drop"
+    assert log["msg"]["From"] == "me@example.com"
+    assert log["msg"]["To"] == "you@example.com"
+    assert log["msg"].get_content().strip() == "$5.00 back"
+
+
+def test_email_honours_a_custom_host_and_port(monkeypatch):
+    con = _email_con(smtp_host="mail.fastmail.com", smtp_port="587")
+    _FakeSMTP.log.clear()
+    monkeypatch.setattr(notify, "_password", lambda address: "apppw")
+    monkeypatch.setattr(notify.smtplib, "SMTP_SSL", _FakeSMTP)
+
+    notify.send(con, "t", "m")
+    assert (_FakeSMTP.log["host"], _FakeSMTP.log["port"]) == ("mail.fastmail.com", 587)
+
+
+def test_a_failed_email_still_shows_a_macos_notification(monkeypatch):
+    """An alert is never silently lost: an SMTP failure falls back to the desktop."""
+    con = _email_con()
+    shown = {}
+    monkeypatch.setattr(notify, "_macos", lambda title, message: shown.update(title=title, message=message))
+    monkeypatch.setattr(notify, "_password", lambda address: "apppw")
+
+    def refuse(*args, **kwargs):
+        raise notify.smtplib.SMTPException("server said no")
+
+    monkeypatch.setattr(notify.smtplib, "SMTP_SSL", refuse)
+    with pytest.raises(notify.NotifyError):
+        notify.send(con, "Costco price drop", "$5.00 back")
+    assert "email failed" in shown["message"]
+    assert "$5.00 back" in shown["message"]
+
+
+def test_email_not_configured_is_an_error(monkeypatch):
+    con = db.connect(":memory:")
+    db.set_meta(con, "notify_channel", "email")
+    monkeypatch.setattr(notify, "_macos", lambda title, message: None)
+    with pytest.raises(notify.NotifyError, match="not set up"):
+        notify.send(con, "t", "m")
+
+
+def test_a_non_numeric_smtp_port_is_an_error():
+    con = _email_con(smtp_port="not-a-port")
+    with pytest.raises(notify.NotifyError, match="not a number"):
+        notify.email_settings(con)
+
+
+def test_save_password_rejects_a_bad_address():
+    with pytest.raises(notify.NotifyError, match="email address"):
+        notify.save_password("not an address", "abc123")
+
+
+def test_save_password_rejects_a_non_alphanumeric_password():
+    with pytest.raises(notify.NotifyError, match="letters and digits"):
+        notify.save_password("me@example.com", "has;semicolon")
+
+
+def test_migrating_away_from_sms_clears_the_twilio_settings(monkeypatch):
+    """Leftover SMS config is cleared once, and the Keychain item goes with it."""
+    con = db.connect(":memory:")
+    for k, v in (("twilio_sid", "AC123"), ("twilio_from", "+15550000001"),
+                 ("twilio_to", "+15550000002"), ("notify_channel", "twilio")):
+        db.set_meta(con, k, v)
+    commands = []
+
+    class Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(notify.subprocess, "run", lambda cmd, **kw: commands.append(cmd) or Done())
+
+    assert notify.migrate_legacy_channel(con) is True
+    assert notify.channel(con) == "macos"
+    assert all(db.get_meta(con, k) is None for k in notify.LEGACY_KEYS)
+    assert any(notify.LEGACY_KEYCHAIN_SERVICE in cmd and "AC123" in cmd for cmd in commands)
+    # Idempotent: nothing left to clean up on a second run.
+    assert notify.migrate_legacy_channel(con) is False
+
+
+def test_migration_is_a_no_op_on_a_fresh_database(monkeypatch):
+    monkeypatch.setattr(notify.subprocess, "run", lambda *a, **k: pytest.fail("should not touch the Keychain"))
+    assert notify.migrate_legacy_channel(db.connect(":memory:")) is False

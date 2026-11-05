@@ -256,37 +256,42 @@ def cmd_coupons(args, con):
 
 
 def cmd_notify(args, con):
-    if args.action == "twilio":
-        print("Twilio SMS setup. Find these at console.twilio.com.")
-        sid = input("Account SID: ").strip()
-        from_ = input("Twilio phone number to send from (+15551234567): ").strip()
-        to = input("Your mobile number (+15551234567): ").strip()
-        token = getpass.getpass("Auth token (hidden): ").strip()
-        if not (sid and from_ and to and token):
-            sys.exit("All four values are needed.")
-        notify.save_token(sid, token)
-        for k, v in (("twilio_sid", sid), ("twilio_from", from_), ("twilio_to", to), ("notify_channel", "twilio")):
+    if args.action == "email":
+        print("Email alerts. For Gmail, create an app password at myaccount.google.com/apppasswords.")
+        from_ = input("Send from (your email address): ").strip()
+        to = input(f"Send to [{from_ or 'the same address'}]: ").strip() or from_
+        host = input(f"SMTP host [{notify.DEFAULT_SMTP_HOST}]: ").strip() or notify.DEFAULT_SMTP_HOST
+        port = input(f"SMTP port [{notify.DEFAULT_SMTP_PORT}]: ").strip() or str(notify.DEFAULT_SMTP_PORT)
+        password = getpass.getpass("App password (hidden): ").strip()
+        if not (from_ and to and password):
+            sys.exit("An address to send from, an address to send to, and an app password are all needed.")
+        if not port.isdigit():
+            sys.exit(f"SMTP port should be a number, not {port!r}.")
+        notify.save_password(from_, password)
+        for k, v in (("email_from", from_), ("email_to", to), ("smtp_host", host), ("smtp_port", port),
+                     ("notify_channel", "email")):
             db.set_meta(con, k, v)
         con.commit()
-        print("Saved. Token is in your macOS Keychain (service costco-cli-twilio). Sending a test message...")
-        notify.send(con, "costco-cli", "SMS alerts are set up.")
+        print(f"Saved. App password is in your macOS Keychain (service {notify.KEYCHAIN_SERVICE}). "
+              "Sending a test message...")
+        notify.send(con, "costco-cli", "Email alerts are set up.")
         print("Sent.")
     elif args.action == "test":
         used = notify.send(con, "costco-cli", "Test alert.")
         print(f"Sent via {used}.")
     elif args.action == "macos":
-        s = notify.twilio_settings(con)
+        s = notify.email_settings(con)
         if s:
-            notify.delete_token(s["sid"])
-        for k in ("twilio_sid", "twilio_from", "twilio_to"):
+            notify.delete_password(s["email_from"])
+        for k in notify.EMAIL_KEYS:
             con.execute("DELETE FROM meta WHERE key = ?", (k,))
         db.set_meta(con, "notify_channel", "macos")
         con.commit()
-        print("Alerts will use macOS notifications. Twilio settings and Keychain token removed.")
+        print("Alerts will use macOS notifications. Email settings and Keychain password removed.")
     else:
-        s = notify.twilio_settings(con)
-        if notify.channel(con) == "twilio" and s:
-            print(f"SMS via Twilio from {s['from']} to {s['to']}")
+        s = notify.email_settings(con)
+        if notify.channel(con) == "email" and s:
+            print(f"Email from {s['email_from']} to {s['email_to']} via {s['smtp_host']}:{s['smtp_port']}")
         else:
             print("macOS notifications on this computer")
 
@@ -353,8 +358,8 @@ def build_parser():
     p.add_argument("--mine", action="store_true", help="only items you've bought before")
     p.set_defaults(fn=cmd_coupons)
 
-    p = sub.add_parser("notify", help="where alerts go: macOS notifications or SMS via Twilio")
-    p.add_argument("action", choices=["status", "twilio", "test", "macos"], nargs="?", default="status")
+    p = sub.add_parser("notify", help="where alerts go: macOS notifications or email")
+    p.add_argument("action", choices=["status", "email", "test", "macos"], nargs="?", default="status")
     p.set_defaults(fn=cmd_notify)
 
     p = sub.add_parser("schedule", help="run sync + drop alerts daily in the background")
@@ -370,6 +375,9 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     con = db.connect()
+    if notify.migrate_legacy_channel(con):
+        print("Note: SMS alerts have been removed. Alerts now use macOS notifications; "
+              "run `costco notify email` to get them by email instead.", file=sys.stderr)
     try:
         rc = args.fn(args, con)
         return rc if isinstance(rc, int) else 0
