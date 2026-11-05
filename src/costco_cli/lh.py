@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import inspect
 import re
+import time
 from datetime import date, datetime
 
 import grpc
@@ -20,7 +21,8 @@ import littlehorse
 from littlehorse.config import LHConfig
 from littlehorse.model import (Comparator, CompleteUserTaskRunRequest,
                                ListUserTaskRunRequest, PutUserTaskDefRequest, RunWfRequest,
-                               TaskDefId, UserTaskField, UserTaskRunId, UserTaskRunStatus,
+                               SearchWfSpecRequest, TaskDefId, UserTaskField,
+                               UserTaskRunId, UserTaskRunStatus,
                                VariableMutationType, VariableType, WfRunId,
                                WfRunVariableAccessLevel)
 from littlehorse.worker import LHTaskWorker
@@ -185,6 +187,35 @@ def claim_workflow(thread):
                    window_closed, claimed, retries=2)
 
 
+READY_POLL_SECONDS = 2
+READY_TIMEOUT_SECONDS = 180
+
+
+def wait_until_ready(config=None, timeout=READY_TIMEOUT_SECONDS, poll=READY_POLL_SECONDS):
+    """Block until the server can actually serve requests.
+
+    `lhctl version` answers within a few seconds of boot, but the Kafka Streams
+    application underneath needs roughly half a minute more before it accepts
+    anything else -- until then every call fails with UNAVAILABLE and a detail
+    of "Kafka Streams not ready yet" or "Streams application is in REBALANCING
+    state". A worker that registers inside that window just spins in its retry
+    loop printing errors, so wait for a real query to succeed first.
+
+    Raises the underlying RpcError if the server is unreachable for some other
+    reason, or if it is still not ready after `timeout` seconds.
+    """
+    config = config or LHConfig()
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            config.stub().SearchWfSpec(SearchWfSpecRequest())
+            return True
+        except grpc.RpcError as e:
+            if e.code() is not grpc.StatusCode.UNAVAILABLE or time.monotonic() >= deadline:
+                raise
+            time.sleep(poll)
+
+
 def _put_task_def(handler, name, config):
     """Register one TaskDef, tolerating one that is already there.
 
@@ -263,6 +294,13 @@ def worker_main():
       like this one, and it gives clean shutdown under launchd or Docker. Off
       the main thread it fails *silently*: use asyncio.run(worker.start()).
     """
+    print("waiting for the LittleHorse server...", flush=True)
+    wait_until_ready()
+    # Registering here is what makes the worker self-sufficient: start the
+    # server, start this, and the workflow exists. register() is idempotent.
+    register()
+    print(f"registered {WF_NAME}; serving {TASK_NOTIFY} and {TASK_RECORD}", flush=True)
+
     async def main():
         config = LHConfig()
         workers = [LHTaskWorker(notify_drop, TASK_NOTIFY, config),

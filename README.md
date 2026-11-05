@@ -126,11 +126,14 @@ docker run --name lh-standalone -d -v lh-data:/data -e KAFKA_DATA_DIR=/data/kafk
   ghcr.io/littlehorse-enterprises/littlehorse/lh-standalone:1.3.1
 ```
 
-Then run the worker, which registers the workflow on startup and handles the
-reminders:
+Then run the worker. It waits for the server to finish starting (Kafka Streams
+needs about half a minute after the container answers), registers the workflow,
+and handles the reminders until you stop it:
 
 ```bash
 ./.venv-lh/bin/costco-worker
+waiting for the LittleHorse server...
+registered costco-price-adjustment; serving costco-notify-drop and costco-record-claim
 ```
 
 With the extra absent, `costco claim` still records the outcome and says plainly

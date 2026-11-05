@@ -118,3 +118,75 @@ def test_an_unnamed_item_falls_back_to_its_number():
     d = _Drop()
     d.name = None
     assert lh.variables_for(d)["name"] == "1707952"
+
+
+# ---------- readiness gate ----------
+
+class _FakeRpcError(Exception):
+    def __init__(self, code):
+        self._code = code
+
+    def code(self):
+        return self._code
+
+
+class _FakeStub:
+    """Fails with UNAVAILABLE a few times, as a rebalancing server does."""
+
+    def __init__(self, unavailable_times=0, code=None):
+        import grpc
+        self.left = unavailable_times
+        self.code = code or grpc.StatusCode.UNAVAILABLE
+        self.calls = 0
+
+    def SearchWfSpec(self, _request):
+        self.calls += 1
+        if self.left > 0:
+            self.left -= 1
+            raise _FakeRpcError(self.code)
+        return object()
+
+
+class _FakeConfig:
+    def __init__(self, stub):
+        self._stub = stub
+
+    def stub(self):
+        return self._stub
+
+
+def _patch_rpc_error(monkeypatch):
+    """wait_until_ready catches grpc.RpcError, so the fake must be one."""
+    monkeypatch.setattr(lh.grpc, "RpcError", _FakeRpcError)
+
+
+def test_wait_until_ready_returns_at_once_when_the_server_is_up(monkeypatch):
+    _patch_rpc_error(monkeypatch)
+    stub = _FakeStub(unavailable_times=0)
+    assert lh.wait_until_ready(_FakeConfig(stub)) is True
+    assert stub.calls == 1
+
+
+def test_wait_until_ready_retries_while_kafka_streams_warms_up(monkeypatch):
+    """The real symptom: UNAVAILABLE "Kafka Streams not ready yet" for ~30s
+    after the container starts, while `lhctl version` already answers."""
+    _patch_rpc_error(monkeypatch)
+    stub = _FakeStub(unavailable_times=3)
+    assert lh.wait_until_ready(_FakeConfig(stub), poll=0) is True
+    assert stub.calls == 4
+
+
+def test_wait_until_ready_gives_up_eventually(monkeypatch):
+    _patch_rpc_error(monkeypatch)
+    stub = _FakeStub(unavailable_times=10_000)
+    with pytest.raises(_FakeRpcError):
+        lh.wait_until_ready(_FakeConfig(stub), timeout=0, poll=0)
+
+
+def test_wait_until_ready_does_not_mask_a_real_failure(monkeypatch):
+    """A wrong address or a refused connection must surface, not spin."""
+    import grpc
+    _patch_rpc_error(monkeypatch)
+    stub = _FakeStub(unavailable_times=1, code=grpc.StatusCode.PERMISSION_DENIED)
+    with pytest.raises(_FakeRpcError):
+        lh.wait_until_ready(_FakeConfig(stub), poll=0)
