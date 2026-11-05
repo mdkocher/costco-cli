@@ -63,7 +63,7 @@ costco schedule install   # daily sync + notifications at 07:00
 | `costco drops` | Price drops you can claim. |
 | `costco coupons [search] [--mine]` | Current warehouse coupon book. |
 | `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
-| `costco claim <item> [--skip] [--purchase ID] [--note ...]` | Settle a price adjustment. |
+| `costco claim [item] [--skip] [--purchase ID] [--note ...]` | Settle a price adjustment; omit the item to pick from a list. |
 | `costco claims [--limit N]` | Adjustments you have already settled. |
 | `costco notify [status\|email\|test\|macos]` | Choose where alerts go. |
 
@@ -83,15 +83,44 @@ Gmail needs an [app password](https://myaccount.google.com/apppasswords) rather 
 
 If sending mail fails, the alert still appears as a macOS notification, so it is never silently lost.
 
-You get an alert when new price drops show up, and when the saved Costco sign-in has expired.
+You get an alert when new price drops show up, carrying the command to settle
+them, and when the saved Costco sign-in has expired.
+
+Two more, so that silence from the daily job means something rather than
+nothing:
+
+- **If a run fails** — a crash, or an unreachable LittleHorse server — it mails
+  you rather than dying quietly in the log.
+- **Once a week** it reports in: how far the sync has got, how many adjustments
+  are waiting, how many you settled, and whether claim tracking is running. It
+  goes on elapsed days rather than a fixed weekday, so a Mac asleep on Monday
+  does not skip the week.
+
+So no mail between one weekly note and the next means something is wrong,
+rather than just a quiet month at Costco.
 
 ## Settling claims
 
 A price adjustment has a deadline — 30 days from purchase — and `costco drops`
 only tells you it exists. `costco claim` records what you did about it:
 
+Run it with no arguments and it asks:
+
+```
+$ costco claim
+Price adjustments waiting on you:
+
+  1.   $12.00  Kirkland Oxi Powder    claim by 2026-11-25 (20d left)
+  2.    $4.00  Head Gloves            claim by 2026-12-02 (27d left)
+
+Which one? [1-2, Enter to quit] 1
+Did you get the $12.00 back? [y/n, Enter to quit] y
+Claimed: $12.00 on Kirkland Oxi Powder.
+```
+
+Or name the item directly, which is what the alerts tell you to do:
+
 ```bash
-costco drops                 # $12.00 back on item 1707952, claim by 2026-11-25
 costco claim 1707952         # you got it back
 costco claim 1707952 --skip  # not worth the trip
 costco claims                # what you have settled, and what it came to
