@@ -1,8 +1,8 @@
 # Setting up costco-cli on an always-on Mac
 
-This guide sets up `costco` on a Mac that stays on (a Mac mini, an old MacBook with the lid open, etc.) so it syncs every morning and texts you when there's a price adjustment to claim.
+This guide sets up `costco` on a Mac that stays on (a Mac mini, an old MacBook with the lid open, etc.) so it syncs every morning and alerts you when there's a price adjustment to claim.
 
-Time needed: about 30 minutes, most of it Twilio signup.
+Time needed: about 15 minutes.
 
 What you'll end up with:
 
@@ -38,7 +38,7 @@ If the Mac is asleep at 7:00, launchd runs the job when it wakes, so a missed mo
 
 ### Stay logged in
 
-The daily job runs inside your user session, and reads the Twilio token from your login Keychain. So your user has to be logged in.
+The daily job runs inside your user session, and reads the email app password from your login Keychain. So your user has to be logged in.
 
 - After a restart, log in once (Screen Sharing works for this).
 - Optional: **System Settings > Users & Groups > Automatically log in as** your user. This isn't available with FileVault on, and it means anyone with physical access gets in. Only do it if the Mac is somewhere you trust.
@@ -115,63 +115,62 @@ The sign-in is saved in `~/.local/share/costco-cli/chrome-profile`. Later syncs 
 
 ---
 
-## 4. Set up text alerts with Twilio
+## 4. Set up email alerts
 
-### 4a. Create a Twilio account
+Alerts are macOS notifications by default, which only reach you at that Mac. Email also reaches your phone, which matters because a price adjustment has a deadline.
 
-1. Sign up at [twilio.com/try-twilio](https://www.twilio.com/try-twilio) and verify your email and your own mobile number.
-2. Open the [Twilio Console](https://console.twilio.com). On the dashboard, under **Account Info**, you'll see:
-   - **Account SID**: starts with `AC`, 34 characters
-   - **Auth Token**: click to reveal. Treat it like a password.
+### 4a. Get an app password
 
-Keep that page open; you'll paste both in step 4c.
+For Gmail, you need an **app password** rather than your account password:
 
-### 4b. Get a number that can send texts
+1. Two-step verification must be on: [myaccount.google.com/security](https://myaccount.google.com/security).
+2. Go to [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
+3. Create one named `costco-cli`. Google shows 16 characters in four groups — you can paste it with or without the spaces.
 
-1. In the Console, go to **Phone Numbers > Manage > Buy a number** (a trial account gets credit for one).
-2. Pick a number with **SMS** capability. Note it in `+1XXXXXXXXXX` form.
+Any SMTP server that accepts implicit TLS works just as well; you'll need its host and port instead. Common ones:
 
-**Trial accounts** can only text numbers listed under **Phone Numbers > Manage > Verified Caller IDs**. Your own mobile is usually there already from signup. Trial messages start with "Sent from your Twilio trial account".
+| Provider | Host | Port |
+|---|---|---|
+| Gmail | `smtp.gmail.com` | 465 |
+| iCloud Mail | `smtp.mail.me.com` | 587 |
+| Fastmail | `smtp.fastmail.com` | 465 |
 
-**US delivery.** Carriers block or filter texts from unregistered numbers. To get reliable delivery after the trial:
-- **Toll-free number + Toll-Free Verification** is usually the simplest for a personal alert like this. Buy a toll-free number and submit verification in the Console (search the Console for "Toll-Free Verification").
-- **A2P 10DLC registration** is the route for a regular local number. Twilio has a "Sole Proprietor" option for individuals.
-
-Twilio's menus move around; if a path above doesn't match, use the Console's search box.
-
-### 4c. Connect costco-cli to Twilio
+### 4b. Connect costco-cli to email
 
 On the always-on Mac:
 
 ```bash
-costco notify twilio
+costco notify email
 ```
 
-It asks for four things:
+It asks for five things:
 
 | Prompt | What to enter |
 |---|---|
-| Account SID | the `AC...` value from the Console |
-| Twilio phone number to send from | the number from step 4b, like `+15415550123` |
-| Your mobile number | where alerts should go, like `+15415550199` |
-| Auth token (hidden) | paste the Auth Token; nothing shows as you paste, that's normal |
+| Send from | the mailbox doing the sending, like `you@gmail.com` |
+| Send to | where alerts should go; press Return to use the same address |
+| SMTP host | press Return for `smtp.gmail.com` |
+| SMTP port | press Return for `465` |
+| App password (hidden) | paste the app password; nothing shows as you paste, that's normal |
 
-It then sends a test text: "costco-cli: SMS alerts are set up."
+It then sends a test message: "costco-cli: Email alerts are set up."
 
 Where things are stored:
-- **Auth Token**: macOS Keychain on that Mac, item `costco-cli-twilio`. Not in any file, not in the repo. You can see it in the Keychain Access app.
-- **SID and phone numbers**: the local database at `~/.local/share/costco-cli/costco.db`.
+- **App password**: macOS Keychain on that Mac, item `costco-cli-email`. Not in any file, not in the repo. You can see it in the Keychain Access app.
+- **Addresses and SMTP settings**: the local database at `~/.local/share/costco-cli/costco.db`.
 
 Useful commands:
 
 ```bash
 costco notify          # show where alerts go
 costco notify test     # send a test alert
-costco notify twilio   # run setup again (e.g. after rotating the Auth Token)
-costco notify macos    # stop texting; remove Twilio settings and the Keychain item
+costco notify email    # run setup again (e.g. after rotating the app password)
+costco notify macos    # stop emailing; remove the settings and the Keychain item
 ```
 
-If you ever rotate the Auth Token in the Twilio Console, run `costco notify twilio` again with the new one.
+If you revoke the app password, run `costco notify email` again with a new one.
+
+If sending fails for any reason, the alert still appears as a macOS notification on that Mac, so nothing is silently lost.
 
 ---
 
@@ -258,8 +257,8 @@ The last command deletes your purchase database and the saved Costco sign-in.
 | `Something is already listening on port 9333` | Another program uses that port. Set `COSTCO_CLI_CDP_PORT` to another number, e.g. `export COSTCO_CLI_CDP_PORT=9444` in `~/.zprofile`. |
 | Costco sign-in page won't accept your login | Make sure you're signing in inside the window `costco login` opened. If it keeps failing, quit all Chrome windows and run `costco login` again. |
 | `Saved Costco sign-in has expired` | Run `costco login` at the Mac's screen. |
-| `Twilio returned HTTP 401` | Wrong SID or Auth Token. Run `costco notify twilio` again. |
-| `Twilio returned HTTP 400` mentioning an unverified number | Trial account: add your mobile under Verified Caller IDs, or upgrade the account. |
-| Test says sent but no text arrives | Carrier filtering of an unregistered number. Complete Toll-Free Verification or A2P 10DLC (step 4b). Check **Monitor > Logs > Messaging** in the Twilio Console for the delivery status. |
-| `Twilio auth token not found in Keychain` | The job ran while you were logged out, or the item was deleted. Log in to the Mac; if it persists, run `costco notify twilio`. |
+| `The mail server rejected the app password` | The app password is wrong or was revoked. Create a new one and run `costco notify email` again. |
+| `Could not send mail: ...` | Check the SMTP host and port with `costco notify`. Gmail wants `smtp.gmail.com:465`; some providers want 587. |
+| Test says sent but no mail arrives | Check the spam folder, and that **Send to** is the address you expect (`costco notify` shows it). |
+| `Email app password not found in Keychain` | The job ran while you were logged out, or the item was deleted. Log in to the Mac; if it persists, run `costco notify email`. |
 | No alerts in the morning | `costco schedule status` should say loaded. Check the log file above, and that the Mac wasn't logged out. |
