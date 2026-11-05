@@ -112,9 +112,14 @@ nothing:
 
   ```bash
   costco notify summary            # print it now
+  costco notify summary --send     # email it now, to see what actually lands
   costco notify summary --days 1   # every morning instead
   costco notify summary --off
   ```
+
+  `Tracking` says `not checked (nothing waiting)` on a quiet period: with no
+  claims to reconcile the daily job never contacts the server, so the summary
+  does not claim a health check it did not perform.
 
 So no mail between one weekly note and the next means something is wrong,
 rather than just a quiet month at Costco.

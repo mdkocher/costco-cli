@@ -275,12 +275,15 @@ def start_claim_runs(con, drops):
     anything already running is left alone. That is what makes losing the
     server survivable -- SQLite stays the record either way.
 
-    Returns (started, reason_it_is_off).
+    Returns (started, status): status is None when runs were actually started,
+    UNCHECKED when there was nothing to reconcile, or a reason it is off.
     """
     decided = db.claim_outcomes(con)
     todo = [d for d in drops if (d.purchase_id, d.item_number) not in decided]
     if not todo:
-        return 0, None
+        # Nothing to reconcile, so the server was never contacted. Saying
+        # "running" here would assert a health check that never happened.
+        return 0, UNCHECKED
     lh, why = _littlehorse()
     if lh is None:
         return 0, why
@@ -375,6 +378,7 @@ def _settle(con, d, outcome, note=None):
     return 0
 
 
+UNCHECKED = "not checked (nothing waiting)"
 DEFAULT_SUMMARY_DAYS = 7
 
 
@@ -498,9 +502,14 @@ def cmd_daily(args, con):
         quiet = [d for d in fresh if not d.alertable]
         print(f"{len(fresh)} new price drops"
               + (f" ({len(quiet)} seasonal, no alert sent)" if quiet else ""))
-        started, off = start_claim_runs(con, drops)
-        print(f"claim tracking idle: {off}" if off else f"{started} claim workflow(s) started")
-        if maybe_summary(con, off or "running"):
+        started, status = start_claim_runs(con, drops)
+        if status is UNCHECKED:
+            print("no claims waiting; claim tracking not contacted")
+        elif status:
+            print(f"claim tracking idle: {status}")
+        else:
+            print(f"{started} claim workflow(s) started")
+        if maybe_summary(con, status or "running"):
             print("summary sent")
     except Exception as e:
         alert_failure(con, "daily run failed", e)
@@ -557,10 +566,16 @@ def cmd_notify(args, con):
             db.set_meta(con, "summary_days", str(args.days))
             con.commit()
             print(f"Summary every {args.days} day(s).")
+        elif args.send:
+            every = summary_interval(con) or DEFAULT_SUMMARY_DAYS
+            notify.send(con, "Costco summary", summary_text(con, UNCHECKED, days=every))
+            db.set_meta(con, "last_summary", date.today().isoformat())
+            con.commit()
+            print(f"Sent, and the clock reset: next one in {every} day(s).")
         else:
             every = summary_interval(con)
             print(f"Emailed every {every} day(s).\n" if every else "Summary emails are off.\n")
-            print(summary_text(con, "(not checked)", days=every or DEFAULT_SUMMARY_DAYS))
+            print(summary_text(con, UNCHECKED, days=every or DEFAULT_SUMMARY_DAYS))
     elif args.action == "test":
         used = notify.send(con, "costco-cli", "Test alert.")
         print(f"Sent via {used}.")
@@ -660,6 +675,7 @@ def build_parser():
                    nargs="?", default="status")
     p.add_argument("--days", type=int, help="summary: send one every N days")
     p.add_argument("--off", action="store_true", help="summary: stop sending them")
+    p.add_argument("--send", action="store_true", help="summary: email it now, whenever the last one went")
     p.set_defaults(fn=cmd_notify)
 
     p = sub.add_parser("schedule", help="run sync + drop alerts daily in the background")

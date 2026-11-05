@@ -494,13 +494,32 @@ def test_reconciliation_skips_drops_already_settled(monkeypatch):
     assert fake.started == [("R2", "1819379")]
 
 
-def test_reconciliation_does_nothing_when_everything_is_settled(monkeypatch):
+def test_nothing_to_reconcile_is_reported_as_unchecked(monkeypatch):
+    """With nothing waiting the server is never contacted, so the status must
+    not claim it is running -- that would assert a health check that never
+    happened, in the one email whose job is to say whether this works."""
     from costco_cli import cli
     monkeypatch.setattr(cli, "_littlehorse", lambda: (_ for _ in ()).throw(
         AssertionError("should not even look for the SDK")))
     con = db.connect(":memory:")
     db.record_claim(con, "R1", "1707952", 12.0, "claimed")
-    assert cli.start_claim_runs(con, [_FakeDrop("R1", "1707952")]) == (0, None)
+    assert cli.start_claim_runs(con, [_FakeDrop("R1", "1707952")]) == (0, cli.UNCHECKED)
+
+
+def test_a_started_run_reports_no_caveat(monkeypatch):
+    """Contrast: here the server really was contacted, so status is None."""
+    from costco_cli import cli
+    monkeypatch.setattr(cli, "_littlehorse", lambda: (_FakeLH(), None))
+    started, status = cli.start_claim_runs(db.connect(":memory:"), [_FakeDrop("R1", "1707952")])
+    assert (started, status) == (1, None)
+
+
+def test_the_summary_does_not_claim_tracking_is_running_when_unchecked():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    text = cli.summary_text(con, cli.UNCHECKED, today=date(2026, 11, 5), days=7)
+    assert "Tracking  not checked (nothing waiting)" in text
+    assert "Tracking  running" not in text
 
 
 def test_a_server_that_is_down_never_fails_the_morning_sync(monkeypatch):
