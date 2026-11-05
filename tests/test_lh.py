@@ -203,3 +203,34 @@ def test_the_delay_variables_have_defaults():
 def test_the_defaults_match_the_real_adjustment_window():
     from costco_cli import config
     assert lh.DEFAULT_EXPIRES_IN_SECONDS == config.PRICE_ADJUST_DAYS * 24 * 60 * 60
+
+
+# ---------- hand-started runs ----------
+
+def test_a_run_with_no_purchase_line_records_nothing(tmp_path, monkeypatch):
+    """The dashboard's Run button starts a run with every variable NULL. There
+    is no purchase to record, and claims.purchase_id is NOT NULL, so writing
+    anyway fails the task and leaves the run in ERROR."""
+    monkeypatch.setenv("COSTCO_CLI_HOME", str(tmp_path))
+    from costco_cli import config, db
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "costco.db")
+
+    for missing in (None, ""):
+        out = lh._write_claim(missing, "1707952", 12.0, "skipped")
+        assert "not recorded" in out
+        out = lh._write_claim("RCPT1", missing, 12.0, "skipped")
+        assert "not recorded" in out
+
+    con = db.connect()
+    assert db.claim_outcomes(con) == {}
+
+
+def test_a_real_purchase_line_is_still_recorded(tmp_path, monkeypatch):
+    from costco_cli import config, db
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "costco.db")
+
+    assert lh._write_claim("RCPT1", "1707952", 12.0, "claimed") == "claimed"
+    con = db.connect()
+    assert db.claim_outcomes(con) == {("RCPT1", "1707952"): "claimed"}

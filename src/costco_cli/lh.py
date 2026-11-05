@@ -99,6 +99,12 @@ def _send_drop_alert(name, dollars_back, deadline, where):
 
 
 def _write_claim(purchase_id, item_number, amount, outcome):
+    # A run started by hand -- the dashboard's Run button, or `lhctl run` with
+    # no variables -- has no purchase line behind it. There is nothing real to
+    # record, and claims.purchase_id is NOT NULL, so writing anyway fails the
+    # task with an IntegrityError and leaves the run in ERROR.
+    if not purchase_id or not item_number:
+        return f"{outcome} (not recorded: no purchase line)"
     con = db.connect()
     try:
         db.record_claim(con, purchase_id, item_number, amount, outcome)
