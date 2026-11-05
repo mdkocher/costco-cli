@@ -210,6 +210,10 @@ The job runs as a LaunchAgent, so your user needs to be logged in (after a resta
 
 ## How it works
 
+How the pieces fit together, what each store holds, and what happens when any of it
+breaks: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+
 Costco's sign-in page blocks automated browsers, so `costco` never drives the login. It starts a normal Chrome window with a dedicated profile (`~/.local/share/costco-cli/chrome-profile`) and you sign in yourself. Afterwards it briefly connects to that Chrome over a local DevTools port to read the short-lived session token the costco.com website already keeps, then calls the same JSON endpoints the website's Orders & Purchases page uses. Later syncs reuse the saved profile headlessly.
 
 - Your password is never seen, typed, or stored by this tool.
