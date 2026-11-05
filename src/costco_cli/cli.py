@@ -191,17 +191,42 @@ def cmd_drops(args, con):
         sync.refresh_coupons(con, today, print)
         con.commit()
     drops = prices.find_drops(con)
+    # Drops you have already dealt with are history, not a to-do item.
+    decided = db.claim_outcomes(con)
+    hidden = 0
+    if not args.all:
+        kept = [d for d in drops if (d.purchase_id, d.item_number) not in decided]
+        hidden = len(drops) - len(kept)
+        drops = kept
     if not drops:
-        print("No price drops on anything bought in the last 30 days.")
+        print("No price drops on anything bought in the last 30 days."
+              + (f" ({hidden} already settled: costco claims)" if hidden else ""))
         return drops
     table([[d.deadline.isoformat(), day(d.purchased_at), d.source, d.item_number, (d.name or "")[:40],
             qty(d.quantity), money(d.paid_unit), money(d.now_unit), money(d.total),
-            d.reason + ("" if d.alertable else " (seasonal, no text sent)")] for d in drops],
+            d.reason + ("" if d.alertable else " (seasonal, no alert sent)")] for d in drops],
           ["Claim by", "Bought", "Type", "Item", "Name", "Qty", "Paid", "Now", "Back", "Why"], right={5, 6, 7, 8})
     total = sum(d.total for d in drops)
     print(f"\n{money(total)} in possible price adjustments. Bring the receipt to the membership counter, "
-          "or use costco.com chat for online orders.")
+          "or use costco.com chat for online orders."
+          + (f"\n{hidden} already settled; see costco claims." if hidden else ""))
     return drops
+
+
+def cmd_claims(args, con):
+    rows = db.claims(con, limit=args.limit)
+    if not rows:
+        print("No claims settled yet. Price drops waiting on you: costco drops")
+        return
+    table([[r["decided_at"][:10], r["outcome"], r["item_number"], (r["name"] or "")[:40],
+            money(r["amount"]), r["purchase_id"]] for r in rows],
+          ["Settled", "Outcome", "Item", "Name", "Back", "Purchase"], right={4})
+    back = sum(r["amount"] or 0 for r in rows if r["outcome"] == "claimed")
+    lost = sum(r["amount"] or 0 for r in rows if r["outcome"] == "expired")
+    line = f"\n{money(back)} claimed"
+    if lost:
+        line += f", {money(lost)} expired unclaimed"
+    print(line + ".")
 
 
 def notify_new_drops(con, drops):
@@ -224,6 +249,85 @@ def notify_new_drops(con, drops):
     return fresh
 
 
+def _littlehorse():
+    """The optional LittleHorse module, or (None, why) if it is unavailable.
+
+    The SDK caps at Python <3.14 while this CLI runs on anything from 3.10 up,
+    so it is genuinely optional: everything here works without it, and claim
+    tracking is the only thing that goes quiet.
+    """
+    try:
+        from . import lh
+        return lh, None
+    except ImportError as e:
+        return None, f"the littlehorse extra is not installed for this interpreter ({e.name})"
+
+
+def start_claim_runs(con, drops):
+    """Make sure every unsettled drop has a claim workflow.
+
+    This reconciles rather than merely creates: the run id is derived from the
+    purchase line, so a drop whose run the server lost is started again, and
+    anything already running is left alone. That is what makes losing the
+    server survivable -- SQLite stays the record either way.
+
+    Returns (started, reason_it_is_off).
+    """
+    decided = db.claim_outcomes(con)
+    todo = [d for d in drops if (d.purchase_id, d.item_number) not in decided]
+    if not todo:
+        return 0, None
+    lh, why = _littlehorse()
+    if lh is None:
+        return 0, why
+    started = 0
+    for d in todo:
+        try:
+            if lh.ensure_run(d):
+                started += 1
+        except Exception as e:
+            # grpc's exception types are not importable without the extra, and a
+            # server that is down must never fail the morning sync.
+            return started, f"{type(e).__name__}: {e}"
+    return started, None
+
+
+def cmd_claim(args, con):
+    """Settle a price adjustment: record it, and stop the nudges."""
+    matches = [d for d in prices.find_drops(con)
+               if d.item_number == args.item
+               and (args.purchase is None or d.purchase_id == args.purchase)]
+    settled = db.claim_outcomes(con)
+    matches = [d for d in matches if (d.purchase_id, d.item_number) not in settled]
+    if not matches:
+        sys.exit(f"No open price drop for item {args.item}. See: costco drops")
+    if len(matches) > 1:
+        print(f"Item {args.item} is on {len(matches)} receipts. Choose one:")
+        for d in matches:
+            print(f"  --purchase {d.purchase_id}   bought {day(d.purchased_at)}, {money(d.total)} back")
+        return 1
+
+    d = matches[0]
+    outcome = "skipped" if args.skip else "claimed"
+    db.record_claim(con, d.purchase_id, d.item_number, d.total, outcome)
+    con.commit()
+    print(f"{outcome.title()}: {money(d.total)} on {d.name or d.item_number}.")
+
+    lh, why = _littlehorse()
+    if lh is None:
+        print(f"  Nudges continue until {d.deadline}: {why}.")
+        return 0
+    try:
+        if lh.complete_claim(d.purchase_id, d.item_number, claimed=not args.skip, note=args.note):
+            print("  Claim workflow closed; no more reminders.")
+        else:
+            print("  Nothing open on the server for it, so there was nothing to close.")
+    except Exception as e:
+        print(f"  Recorded locally, but could not reach LittleHorse ({e}); "
+              f"reminders may continue until {d.deadline}.")
+    return 0
+
+
 def cmd_daily(args, con):
     """What the scheduled job runs: sync, then notify about new drops."""
     print(f"--- {datetime.now():%Y-%m-%d %H:%M}")
@@ -236,9 +340,15 @@ def cmd_daily(args, con):
         except Exception as ne:
             print(f"alert failed: {ne}")
         return 1
-    fresh = notify_new_drops(con, prices.find_drops(con))
+    drops = prices.find_drops(con)
+    fresh = notify_new_drops(con, drops)
     quiet = [d for d in fresh if not d.alertable]
-    print(f"{len(fresh)} new price drops" + (f" ({len(quiet)} seasonal, not texted)" if quiet else ""))
+    print(f"{len(fresh)} new price drops" + (f" ({len(quiet)} seasonal, no alert sent)" if quiet else ""))
+    started, off = start_claim_runs(con, drops)
+    if off:
+        print(f"claim tracking idle: {off}")
+    else:
+        print(f"{started} claim workflow(s) started")
     return 0
 
 
@@ -353,7 +463,19 @@ def build_parser():
     p.add_argument("--days", type=int, default=config.PRICE_ADJUST_DAYS)
     p.set_defaults(fn=cmd_returns)
 
+    p = sub.add_parser("claim", help="settle a price adjustment and stop the reminders")
+    p.add_argument("item", help="item number, as shown by costco drops")
+    p.add_argument("--purchase", help="receipt or order id, when the item is on more than one")
+    p.add_argument("--skip", action="store_true", help="record that you passed on it")
+    p.add_argument("--note", help="anything worth remembering")
+    p.set_defaults(fn=cmd_claim)
+
+    p = sub.add_parser("claims", help="price adjustments you have already settled")
+    p.add_argument("--limit", type=int, default=None, help="show only the most recent N")
+    p.set_defaults(fn=cmd_claims)
+
     p = sub.add_parser("drops", help="price drops you can claim on recent purchases")
+    p.add_argument("--all", action="store_true", help="include drops already settled")
     p.add_argument("--no-refresh", dest="refresh", action="store_false", help="use stored prices, skip lookups")
     p.set_defaults(fn=cmd_drops)
 

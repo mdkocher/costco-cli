@@ -21,3 +21,4 @@ dist/
 .pytest_cache/
 
 .DS_Store
+.venv-lh/

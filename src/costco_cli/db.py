@@ -2,6 +2,7 @@
 import json
 import re
 import sqlite3
+from datetime import datetime
 
 from . import config
 
@@ -54,6 +55,14 @@ CREATE TABLE IF NOT EXISTS coupons (
     name         TEXT,
     PRIMARY KEY (item_number, valid_from)
 );
+CREATE TABLE IF NOT EXISTS claims (
+    purchase_id  TEXT NOT NULL,
+    item_number  TEXT NOT NULL,
+    amount       REAL,                   -- dollars back, as known when decided
+    outcome      TEXT NOT NULL,          -- claimed | skipped | expired
+    decided_at   TEXT NOT NULL,          -- ISO local time
+    PRIMARY KEY (purchase_id, item_number)
+);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -82,6 +91,51 @@ def get_meta(con, key, default=None):
 def set_meta(con, key, value):
     con.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, str(value)))
+
+
+CLAIM_OUTCOMES = ("claimed", "skipped", "expired")
+
+
+def record_claim(con, purchase_id, item_number, amount, outcome, decided_at=None):
+    """Record how a price adjustment ended.
+
+    Idempotent per purchase line: re-recording the same line replaces the
+    earlier outcome, so a redelivered task cannot create a second row.
+    """
+    if outcome not in CLAIM_OUTCOMES:
+        raise ValueError(f"outcome must be one of {CLAIM_OUTCOMES}, not {outcome!r}")
+    # "expired" is the workflow giving up; it must never bury an answer you gave.
+    # That happens for real: claim it in the shop, and days later the deadline
+    # fires because the server never heard about it.
+    if outcome == "expired":
+        row = con.execute("SELECT outcome FROM claims WHERE purchase_id = ? AND item_number = ?",
+                          (purchase_id, item_number)).fetchone()
+        if row and row["outcome"] in ("claimed", "skipped"):
+            return row["outcome"]
+    con.execute(
+        "INSERT INTO claims(purchase_id, item_number, amount, outcome, decided_at)"
+        " VALUES (?, ?, ?, ?, ?)"
+        " ON CONFLICT(purchase_id, item_number) DO UPDATE SET"
+        " amount = excluded.amount, outcome = excluded.outcome, decided_at = excluded.decided_at",
+        (purchase_id, item_number, amount, outcome,
+         decided_at or datetime.now().isoformat(timespec="seconds")))
+    return outcome
+
+
+def claim_outcomes(con):
+    """{(purchase_id, item_number): outcome} for every claim already decided."""
+    return {(r["purchase_id"], r["item_number"]): r["outcome"]
+            for r in con.execute("SELECT purchase_id, item_number, outcome FROM claims")}
+
+
+def claims(con, limit=None):
+    """Decided claims, newest first, with the item name where we know it."""
+    sql = ("SELECT c.*, COALESCE(i.name, '') AS name FROM claims c"
+           " LEFT JOIN items i ON i.item_number = c.item_number"
+           " ORDER BY c.decided_at DESC, c.purchase_id")
+    if limit:
+        return con.execute(sql + " LIMIT ?", (limit,)).fetchall()
+    return con.execute(sql).fetchall()
 
 
 def _replace_purchase(con, purchase, lines):

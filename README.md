@@ -22,6 +22,7 @@ $14.40 in possible price adjustments. Bring the receipt to the membership counte
 - **`spend`** summarizes spending by month, year, type (warehouse / online / gas), location or department.
 - **`returns`** lists items still inside the price-adjustment (30 day) or electronics return (90 day) window.
 - **`coupons`** shows the current coupon book, or just the items you've bought before (`--mine`).
+- **`claim`** / **`claims`** record what you did about an adjustment, so you can see what you actually got back.
 - **`schedule`** runs a sync every morning and alerts you when there is money to claim, by macOS notification or email.
 
 ## Install
@@ -62,6 +63,8 @@ costco schedule install   # daily sync + notifications at 07:00
 | `costco drops` | Price drops you can claim. |
 | `costco coupons [search] [--mine]` | Current warehouse coupon book. |
 | `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
+| `costco claim <item> [--skip] [--purchase ID] [--note ...]` | Settle a price adjustment. |
+| `costco claims [--limit N]` | Adjustments you have already settled. |
 | `costco notify [status\|email\|test\|macos]` | Choose where alerts go. |
 
 ## Alerts
@@ -81,6 +84,57 @@ Gmail needs an [app password](https://myaccount.google.com/apppasswords) rather 
 If sending mail fails, the alert still appears as a macOS notification, so it is never silently lost.
 
 You get an alert when new price drops show up, and when the saved Costco sign-in has expired.
+
+## Settling claims
+
+A price adjustment has a deadline — 30 days from purchase — and `costco drops`
+only tells you it exists. `costco claim` records what you did about it:
+
+```bash
+costco drops                 # $12.00 back on item 1707952, claim by 2026-11-25
+costco claim 1707952         # you got it back
+costco claim 1707952 --skip  # not worth the trip
+costco claims                # what you have settled, and what it came to
+```
+
+Settled items drop off `costco drops` (use `--all` to see them anyway). If the
+same item is on more than one receipt, `claim` asks which with `--purchase`.
+
+### Optional: reminders before the deadline
+
+That much is just bookkeeping. To be *nudged* a week and a day before a window
+closes, there is an optional [LittleHorse](https://littlehorse.io) workflow: one
+run per claimable purchase line, holding a User Task open until you answer it.
+
+It is optional on purpose. SQLite stays the record — `costco claims` never needs
+a server — and the daily sync reconciles, so a server that loses everything is
+rebuilt from your own database the next morning.
+
+The SDK supports Python 3.10–3.13, so the worker needs its own interpreter:
+
+```bash
+python3.12 -m venv .venv-lh
+./.venv-lh/bin/pip install -e ".[littlehorse]"
+```
+
+Start a server (the `KAFKA_DATA_DIR` setting is what makes its storage survive a
+restart — without it the image reformats Kafka on every boot):
+
+```bash
+docker run --name lh-standalone -d -v lh-data:/data -e KAFKA_DATA_DIR=/data/kafka \
+  -p 2023:2023 -p 8080:8080 -p 9092:9092 \
+  ghcr.io/littlehorse-enterprises/littlehorse/lh-standalone:1.3.1
+```
+
+Then run the worker, which registers the workflow on startup and handles the
+reminders:
+
+```bash
+./.venv-lh/bin/costco-worker
+```
+
+With the extra absent, `costco claim` still records the outcome and says plainly
+that reminders will continue. Nothing else changes.
 
 ## Running on an always-on Mac
 
@@ -131,8 +185,16 @@ Delete that folder (and run `costco notify macos` first if you set up email) to 
 
 ```bash
 git clone https://github.com/mdkocher/costco-cli && cd costco-cli
-pip install -e '.[dev]'
-pytest
+python3 -m venv .venv && ./.venv/bin/pip install -e '.[dev]'
+./.venv/bin/pytest
+```
+
+The tests for the optional LittleHorse layer skip themselves unless the extra is
+installed. To run them too, use an interpreter the SDK supports (3.10–3.13):
+
+```bash
+python3.12 -m venv .venv-lh && ./.venv-lh/bin/pip install -e '.[dev,littlehorse]'
+./.venv-lh/bin/pytest
 ```
 
 ## License
