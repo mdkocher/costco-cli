@@ -535,7 +535,7 @@ def test_the_summary_shows_what_is_waiting_with_its_deadline():
     from costco_cli import cli
     con, today = _summary_con()
     text = cli.summary_text(con, "running", today=today, days=7)
-    assert "Waiting   1 adjustment(s)" in text
+    assert "Waiting   1 adjustment," in text
     assert "KSOXIPOWDER" in text
     assert "Settle an adjustment: costco claim" in text
 
@@ -544,7 +544,7 @@ def test_the_summary_reports_purchases_and_tracking():
     from costco_cli import cli
     con, today = _summary_con()
     text = cli.summary_text(con, "idle: server down", today=today, days=7)
-    assert "1 receipts" in text and "1 warehouse" in text
+    assert "1 receipt," in text and "1 warehouse" in text
     assert "Tracking  idle: server down" in text
 
 
@@ -614,7 +614,7 @@ def test_refunds_are_not_counted_as_purchases():
     r["transactionType"] = "Refund"
     db.save_warehouse_receipt(con, r)
     text = cli.summary_text(con, "running", today=today, days=7)
-    assert "Bought    1 receipts, $59.96" in text     # the refund is excluded
+    assert "Bought    1 receipt, $59.96" in text     # the refund is excluded
     assert "Refunds   1" in text                      # and reported on its own
 
 
@@ -1020,3 +1020,46 @@ def test_version_line_is_quiet_when_current(monkeypatch):
     monkeypatch.setattr(ops, "staleness", lambda: (False, pathlib.Path("/repo"), "aaa", "aaa"))
     line = ops.version_line("0.1.0")
     assert "out of date" not in line and "build aaa" in line
+
+
+def test_the_summary_accounts_for_drops_it_never_alerted_on():
+    """24A: seasonal drops are deliberately never emailed, so without this line
+    that money is invisible to anyone who only reads mail."""
+    from costco_cli import cli
+
+    class _Quiet:
+        purchase_id, item_number, name = "R1", "16001", "Pinot Noir"
+        total, alertable = 8.0, False
+        deadline = date.today() + timedelta(days=12)
+
+    class _Loud(_Quiet):
+        purchase_id, item_number, name = "R2", "1707952", "Oxi Powder"
+        total, alertable = 12.0, True
+
+    con = db.connect(":memory:")
+    cli_open = cli.open_claims
+    try:
+        cli.open_claims = lambda c: [_Loud(), _Quiet()]
+        text = cli.summary_text(con, "running", today=date.today(), days=7)
+    finally:
+        cli.open_claims = cli_open
+    assert "Waiting   2 adjustments, $20.00" in text
+    assert "1 of these never alerted ($8.00, seasonal department)" in text
+
+
+def test_the_summary_is_silent_when_everything_was_alerted():
+    from costco_cli import cli
+
+    class _Loud:
+        purchase_id, item_number, name = "R2", "1707952", "Oxi Powder"
+        total, alertable = 12.0, True
+        deadline = date.today() + timedelta(days=12)
+
+    con = db.connect(":memory:")
+    cli_open = cli.open_claims
+    try:
+        cli.open_claims = lambda c: [_Loud()]
+        text = cli.summary_text(con, "running", today=date.today(), days=7)
+    finally:
+        cli.open_claims = cli_open
+    assert "never alerted" not in text

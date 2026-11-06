@@ -35,7 +35,10 @@ from . import db, notify
 
 WF_NAME = "costco-price-adjustment"
 USER_TASK_DEF = "claim-price-adjustment"
-TASK_NOTIFY = "costco-notify-drop"
+# A new name rather than a -v2 suffix: TaskDefs are immutable, and this is a
+# different job from the discovery alert that cmd_daily sends. This one only
+# ever nudges, and it knows which item it is nudging about.
+TASK_NUDGE = "costco-nudge-claim"
 TASK_RECORD = "costco-record-claim"
 
 # Thrown by the User Task when cancel_user_task_run_after fires, i.e. the
@@ -92,15 +95,23 @@ def seconds_until(when, now=None):
 # blocking code, so it goes to a thread -- an unreachable mail server would
 # otherwise stall every other task for the SMTP timeout.
 
-def _send_drop_alert(name, dollars_back, deadline, where):
+def _send_nudge(name, item_number, dollars_back, deadline, where):
+    """A reminder, which must not read like the first alert.
+
+    Days left is computed here rather than passed in: the workflow schedules
+    two of these at different delays, and neither knows which one it is.
+    """
+    try:
+        left = (date.fromisoformat(deadline) - date.today()).days
+    except ValueError:
+        left = None
+    subject = (f"Reminder: {left} day{'' if left == 1 else 's'} left to claim"
+               if left is not None and left >= 0 else "Reminder: claim window closing")
     con = db.connect()
     try:
-        # No item number here: adding a parameter would change the TaskDef's
-        # signature, and TaskDefs are immutable. `costco claim` with no
-        # argument lists what is open, which is the same information.
-        return notify.send(con, "Costco price drop",
+        return notify.send(con, subject,
                            f"${dollars_back:.2f} back on {name}, claim by {deadline}. "
-                           f"{where}. Settle it: costco claim")
+                           f"{where}. Settle it: costco claim {item_number}")
     finally:
         con.close()
 
@@ -121,9 +132,10 @@ def _write_claim(purchase_id, item_number, amount, outcome):
         con.close()
 
 
-async def notify_drop(name: str, dollars_back: float, deadline: str, where: str) -> str:
-    """Alert you to a claimable drop. Raises on failure so LittleHorse retries."""
-    return await asyncio.to_thread(_send_drop_alert, name, dollars_back, deadline, where)
+async def nudge_claim(name: str, item_number: str, dollars_back: float,
+                      deadline: str, where: str) -> str:
+    """Remind you about an open claim. Raises on failure so LittleHorse retries."""
+    return await asyncio.to_thread(_send_nudge, name, item_number, dollars_back, deadline, where)
 
 
 def outcome_for(window_closed, claimed):
@@ -187,10 +199,10 @@ def claim_workflow(thread):
     user_task.with_notes(where)
     user_task.with_on_cancellation_exception(EXC_WINDOW_CLOSED)
 
-    thread.schedule_reminder_task(user_task, first_nudge, TASK_NOTIFY,
-                                  name, dollars_back, deadline, where)
-    thread.schedule_reminder_task(user_task, final_nudge, TASK_NOTIFY,
-                                  name, dollars_back, deadline, where)
+    thread.schedule_reminder_task(user_task, first_nudge, TASK_NUDGE,
+                                  name, item_number, dollars_back, deadline, where)
+    thread.schedule_reminder_task(user_task, final_nudge, TASK_NUDGE,
+                                  name, item_number, dollars_back, deadline, where)
     thread.cancel_user_task_run_after(user_task, expires_in)
 
     # The deadline passed with no answer. A handler that finishes normally lets
@@ -269,7 +281,7 @@ def _put_task_def(handler, name, config):
 def register(config=None):
     """Register the task defs, the user task def and the wf spec. Idempotent."""
     config = config or LHConfig()
-    _put_task_def(notify_drop, TASK_NOTIFY, config)
+    _put_task_def(nudge_claim, TASK_NUDGE, config)
     _put_task_def(record_claim, TASK_RECORD, config)
     config.stub().PutUserTaskDef(PutUserTaskDefRequest(
         name=USER_TASK_DEF,
@@ -327,11 +339,11 @@ def worker_main():
     # Registering here is what makes the worker self-sufficient: start the
     # server, start this, and the workflow exists. register() is idempotent.
     register()
-    print(f"registered {WF_NAME}; serving {TASK_NOTIFY} and {TASK_RECORD}", flush=True)
+    print(f"registered {WF_NAME}; serving {TASK_NUDGE} and {TASK_RECORD}", flush=True)
 
     async def main():
         config = LHConfig()
-        workers = [LHTaskWorker(notify_drop, TASK_NOTIFY, config),
+        workers = [LHTaskWorker(nudge_claim, TASK_NUDGE, config),
                    LHTaskWorker(record_claim, TASK_RECORD, config)]
         await littlehorse.start(*workers)
 

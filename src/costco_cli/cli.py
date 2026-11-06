@@ -403,18 +403,26 @@ def summary_text(con, tracking, today=None, days=None):
     tracked = con.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
 
     out = [f"Costco summary, {days} days to {today.isoformat()}", ""]
-    out.append(f"Sync      last run {db.get_meta(con, 'last_sync', 'never')}, {tracked} purchases tracked")
+    out.append(f"Sync      last run {db.get_meta(con, 'last_sync', 'never')}, "
+               f"{plural(tracked, 'purchase')} tracked")
     if bought:
         kinds = ", ".join(f"{r['n']} {r['source']}" for r in bought)
-        out.append(f"Bought    {sum(r['n'] for r in bought)} receipts, "
+        out.append(f"Bought    {plural(sum(r['n'] for r in bought), 'receipt')}, "
                    f"{money(sum(r['t'] or 0 for r in bought))} ({kinds})")
     else:
         out.append("Bought    nothing")
     if waiting:
-        out.append(f"Waiting   {len(waiting)} adjustment(s), {money(sum(d.total for d in waiting))}")
+        out.append(f"Waiting   {plural(len(waiting), 'adjustment')}, "
+                   f"{money(sum(d.total for d in waiting))}")
         for d in waiting:
             out.append(f"            {money(d.total):>8}  {(d.name or d.item_number)[:30]:30}"
                        f"  by {d.deadline} ({(d.deadline - today).days}d)")
+        # Seasonal departments are recorded but deliberately never emailed, so
+        # without this line that money is invisible to anyone who only reads mail.
+        quiet = [d for d in waiting if not d.alertable]
+        if quiet:
+            out.append(f"            {len(quiet)} of these never alerted "
+                       f"({money(sum(d.total for d in quiet))}, seasonal department)")
     else:
         out.append("Waiting   nothing to claim")
     out.append("Settled   " + (", ".join(f"{r['n']} {r['outcome']} {money(r['t'])}" for r in settled)
