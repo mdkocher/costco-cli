@@ -1,6 +1,8 @@
 """costco: track your Costco purchases and catch price adjustments."""
 import argparse
 import getpass
+import logging
+import subprocess
 import traceback
 import json
 import sys
@@ -595,6 +597,84 @@ def cmd_summary(args, con):
     print(summary_text(con, UNCHECKED, days=every))
 
 
+def plural(n, one, many=None):
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def server_reachable(timeout=2.0):
+    """(ok, detail) for the claim-tracking server, without hanging the status view.
+
+    Deliberately short: this runs on a bare `costco`, so a dead server must cost
+    a couple of seconds, not the thirty the SDK would otherwise spend retrying.
+    """
+    # The SDK announces every channel it opens; that is debug chatter in a view
+    # a person reads every morning.
+    logging.getLogger("LHConfig").setLevel(logging.ERROR)
+    try:
+        lh.wait_until_ready(timeout=timeout, poll=0.5)
+        return True, "reachable"
+    except Exception as e:
+        return False, f"{type(e).__name__}"
+
+
+def worker_running():
+    """Whether a costco-worker process is alive. macOS only, like the rest."""
+    try:
+        out = subprocess.run(["pgrep", "-f", "costco-worker"], capture_output=True, text=True)
+        return out.returncode == 0 and bool(out.stdout.strip())
+    except Exception:
+        return False
+
+
+def cmd_status(args, con):
+    """Where things stand — what bare `costco` shows.
+
+    The question you actually have most mornings is "is there money waiting,
+    and is this thing still working". Answering it used to take four commands.
+    """
+    today = date.today()
+    waiting = open_claims(con)
+    print("Money waiting")
+    if waiting:
+        print(f"  {money(sum(d.total for d in waiting))} across {plural(len(waiting), 'adjustment')}")
+        for d in waiting[:5]:
+            print(f"    {money(d.total):>8}  {(d.name or d.item_number)[:32]:32}"
+                  f"  by {d.deadline} ({(d.deadline - today).days}d)")
+        if len(waiting) > 5:
+            print(f"    … and {len(waiting) - 5} more — costco drops")
+        print("  Settle one: costco claim")
+    else:
+        print("  nothing to claim")
+
+    # 26A: the dedup blob is fine, it was just invisible.
+    suppressed = len(json.loads(db.get_meta(con, "notified_drops", "[]")))
+    settled_total = con.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    print("\nRecord")
+    purchases = con.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
+    print(f"  last sync      {db.get_meta(con, 'last_sync', 'never')}   ({plural(purchases, 'purchase')})")
+    print(f"  settled        {settled_total}   — costco settled")
+    print(f"  already told   {plural(suppressed, 'drop')} suppressed as previously alerted")
+
+    print("\nDelivery")
+    ch = notify.channel(con)
+    s = notify.email_settings(con)
+    print(f"  alerts         {'email to ' + s['email_to'] if ch == 'email' and s else 'macOS notifications'}")
+    every = summary_interval(con)
+    print(f"  summary        {'every ' + str(every) + ' day(s)' if every else 'off'}"
+          f"   (last {db.get_meta(con, 'last_summary', 'never')})")
+    sched = schedule.status()
+    print(f"  daily job      {sched[0] + (' loaded' if sched[1] else ' NOT loaded')}" if sched
+          else "  daily job      not installed — costco schedule install")
+
+    print("\nClaim tracking")
+    ok, detail = server_reachable()
+    print(f"  server         {'reachable' if ok else 'DOWN — ' + detail}")
+    print(f"  worker         {'running' if worker_running() else 'NOT running'}")
+    if not (ok and worker_running()):
+        print("  Reminders will not fire until both are up.")
+    return 0
+
+
 def cmd_notify(args, con):
     if args.action == "email":
         print("Email alerts. For Gmail, create an app password at myaccount.google.com/apppasswords.")
@@ -671,7 +751,8 @@ def build_parser():
     ap = argparse.ArgumentParser(prog="costco", description=__doc__, epilog=EPILOG,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"costco-cli {__version__}")
-    sub = ap.add_subparsers(dest="cmd", required=True, metavar="<command>")
+    ap.set_defaults(fn=cmd_status)
+    sub = ap.add_subparsers(dest="cmd", required=False, metavar="<command>")
 
     p = sub.add_parser("login", help="sign in to Costco in a Chrome window (once, or when the session expires)")
     p.add_argument("--no-sync", dest="sync", action="store_false", help="don't sync right after signing in")

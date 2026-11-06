@@ -897,3 +897,71 @@ def test_no_refunds_says_so(capsys):
     con, _ = _refund_con()
     cli.cmd_refunds(argparse.Namespace(days=90), con)
     assert "No refunds in the last 90 days" in capsys.readouterr().out
+
+
+# ---------- status view ----------
+
+def _status_con():
+    con = db.connect(":memory:")
+    t = date.today()
+    db.save_warehouse_receipt(con, receipt((t - timedelta(days=4)).isoformat() + "T12:00:00",
+                                           [line("1707952", "KSOXIPOWDER", 4, 59.96)], "R1"))
+    db.save_coupons(con, [{"item_number": "1707952", "valid_from": t.isoformat(),
+                           "valid_to": (t + timedelta(days=9)).isoformat(),
+                           "discount": 3.0, "price_after": 11.99, "name": "Kirkland Oxi"}])
+    db.set_meta(con, "last_sync", t.isoformat())
+    return con
+
+
+def _quiet_checks(monkeypatch, reachable=True, worker=True):
+    from costco_cli import cli
+    monkeypatch.setattr(cli, "server_reachable", lambda timeout=2.0: (reachable, "ConnectionError"))
+    monkeypatch.setattr(cli, "worker_running", lambda: worker)
+    return cli
+
+
+def test_status_leads_with_the_money(monkeypatch, capsys):
+    cli = _quiet_checks(monkeypatch)
+    cli.cmd_status(argparse.Namespace(), _status_con())
+    out = capsys.readouterr().out
+    assert out.startswith("Money waiting")
+    assert "$12.00 across 1 adjustment" in out
+    assert "Settle one: costco claim" in out
+
+
+def test_status_says_plainly_when_nothing_is_waiting(monkeypatch, capsys):
+    cli = _quiet_checks(monkeypatch)
+    cli.cmd_status(argparse.Namespace(), db.connect(":memory:"))
+    assert "nothing to claim" in capsys.readouterr().out
+
+
+def test_status_surfaces_the_suppressed_count(monkeypatch, capsys):
+    """26A: the dedup blob is fine, it was only invisible."""
+    import json as _json
+    cli = _quiet_checks(monkeypatch)
+    con = _status_con()
+    db.set_meta(con, "notified_drops", _json.dumps(["R1:1707952:11.99", "R2:1819379:9.99"]))
+    cli.cmd_status(argparse.Namespace(), con)
+    assert "2 drops suppressed" in capsys.readouterr().out
+
+
+def test_status_warns_when_tracking_is_down(monkeypatch, capsys):
+    cli = _quiet_checks(monkeypatch, reachable=False, worker=False)
+    cli.cmd_status(argparse.Namespace(), _status_con())
+    out = capsys.readouterr().out
+    assert "server         DOWN" in out
+    assert "worker         NOT running" in out
+    assert "Reminders will not fire until both are up." in out
+
+
+def test_status_does_not_warn_when_both_are_up(monkeypatch, capsys):
+    cli = _quiet_checks(monkeypatch)
+    cli.cmd_status(argparse.Namespace(), _status_con())
+    assert "Reminders will not fire" not in capsys.readouterr().out
+
+
+def test_plurals_read_correctly():
+    from costco_cli import cli
+    assert cli.plural(1, "purchase") == "1 purchase"
+    assert cli.plural(2, "purchase") == "2 purchases"
+    assert cli.plural(0, "drop") == "0 drops"
