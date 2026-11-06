@@ -1,3 +1,4 @@
+import argparse
 import re
 from datetime import date, timedelta
 
@@ -840,3 +841,59 @@ def test_a_real_purchase_line_is_still_recorded(tmp_path, monkeypatch):
     assert lh._write_claim("RCPT1", "1707952", 12.0, "claimed") == "claimed"
     con = db.connect()
     assert db.claim_outcomes(con) == {("RCPT1", "1707952"): "claimed"}
+
+
+# ---------- refunds view ----------
+
+def _refund_con():
+    con = db.connect(":memory:")
+    t = date.today()
+    db.save_warehouse_receipt(con, receipt((t - timedelta(days=20)).isoformat() + "T12:00:00",
+                                           [line("1707952", "KSOXIPOWDER", 4, 59.96)], "BUY"))
+    return con, t
+
+
+def test_a_full_price_refund_reads_as_a_return(capsys):
+    """Both refunds in two years of real data are returns, so this is the case
+    that must not be mislabelled."""
+    from costco_cli import cli
+    con, t = _refund_con()
+    r = receipt((t - timedelta(days=5)).isoformat() + "T12:00:00",
+                [line("1707952", "KSOXIPOWDER", -1, -14.99)], "REF")
+    r["transactionType"] = "Refund"
+    db.save_warehouse_receipt(con, r)
+    cli.cmd_refunds(argparse.Namespace(days=90), con)
+    assert "return" in capsys.readouterr().out
+
+
+def test_a_partial_refund_reads_as_an_adjustment(capsys):
+    """The whole point: a refund of the difference is a price adjustment, and
+    is what the auto-detection would eventually key on."""
+    from costco_cli import cli
+    con, t = _refund_con()
+    r = receipt((t - timedelta(days=5)).isoformat() + "T12:00:00",
+                [line("1707952", "KSOXIPOWDER", -1, -3.00)], "REF")
+    r["transactionType"] = "Refund"
+    db.save_warehouse_receipt(con, r)
+    cli.cmd_refunds(argparse.Namespace(days=90), con)
+    # Check the table row, not the whole output: the footer explains both words.
+    row = [ln for ln in capsys.readouterr().out.splitlines() if "KSOXIPOWDER" in ln][0]
+    assert row.rstrip().endswith("adjustment")
+
+
+def test_a_refund_for_something_never_bought_is_not_guessed(capsys):
+    from costco_cli import cli
+    con, t = _refund_con()
+    r = receipt((t - timedelta(days=5)).isoformat() + "T12:00:00",
+                [line("999999", "MYSTERY", -1, -9.99)], "REF")
+    r["transactionType"] = "Refund"
+    db.save_warehouse_receipt(con, r)
+    cli.cmd_refunds(argparse.Namespace(days=90), con)
+    assert "unknown" in capsys.readouterr().out
+
+
+def test_no_refunds_says_so(capsys):
+    from costco_cli import cli
+    con, _ = _refund_con()
+    cli.cmd_refunds(argparse.Namespace(days=90), con)
+    assert "No refunds in the last 90 days" in capsys.readouterr().out

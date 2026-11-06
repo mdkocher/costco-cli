@@ -186,8 +186,11 @@ def cmd_returns(args, con):
 
 
 def cmd_drops(args, con):
-    if args.refresh:
-        today = date.today()
+    today = date.today()
+    # The coupon book changes daily at most, so a second look on the same day
+    # should not pay for the network again. --refresh forces it.
+    fresh_today = db.get_meta(con, "coupons_fetched") == today.isoformat()
+    if args.refresh and not (fresh_today and not args.force_refresh):
         sync.refresh_items(con, today, print)
         sync.refresh_coupons(con, today, print)
         con.commit()
@@ -201,23 +204,23 @@ def cmd_drops(args, con):
         drops = kept
     if not drops:
         print("No price drops on anything bought in the last 30 days."
-              + (f" ({hidden} already settled: costco claims)" if hidden else ""))
+              + (f" ({hidden} already settled: costco settled)" if hidden else ""))
         return drops
     table([[d.deadline.isoformat(), day(d.purchased_at), d.source, d.item_number, (d.name or "")[:40],
             qty(d.quantity), money(d.paid_unit), money(d.now_unit), money(d.total),
             d.reason + ("" if d.alertable else " (seasonal, no alert sent)")] for d in drops],
           ["Claim by", "Bought", "Type", "Item", "Name", "Qty", "Paid", "Now", "Back", "Why"], right={5, 6, 7, 8})
     total = sum(d.total for d in drops)
-    print(f"\n{money(total)} in possible price adjustments. Bring the receipt to the membership counter, "
-          "or use costco.com chat for online orders."
-          + (f"\n{hidden} already settled; see costco claims." if hidden else ""))
+    print(f"\n{money(total)} in possible price adjustments. Bring the receipt to the membership "
+          "counter, or use costco.com chat for online orders.\nSettle one: costco claim"
+          + (f"\n{hidden} already settled; see costco settled." if hidden else ""))
     return drops
 
 
-def cmd_claims(args, con):
+def cmd_settled(args, con):
     rows = db.claims(con, limit=args.limit)
     if not rows:
-        print("No claims settled yet. Price drops waiting on you: costco drops")
+        print("Nothing settled yet. Price drops waiting on you: costco drops")
         return
     table([[r["decided_at"][:10], r["outcome"], r["item_number"], (r["name"] or "")[:40],
             money(r["amount"]), r["purchase_id"]] for r in rows],
@@ -522,6 +525,76 @@ def cmd_coupons(args, con):
     print(f"\n{len(rows)} coupons" + (" on things you've bought before" if args.mine else ""))
 
 
+def cmd_refunds(args, con):
+    """What Costco actually gave back — as opposed to what you recorded.
+
+    A full-price refund is a return; one for a fraction of what you paid is a
+    price adjustment. The summary counts these; nothing else showed them.
+    """
+    since = (date.today() - timedelta(days=args.days)).isoformat()
+    rows = con.execute(
+        "SELECT p.purchased_at, p.transaction_type, l.item_number, l.quantity, l.amount,"
+        "       COALESCE(i.name, l.description) AS name, l.unit_price"
+        "  FROM lines l JOIN purchases p ON p.id = l.purchase_id"
+        "  LEFT JOIN items i ON i.item_number = l.item_number"
+        " WHERE p.transaction_type = 'Refund' AND p.purchased_at >= ?"
+        " ORDER BY p.purchased_at DESC", (since,)).fetchall()
+    if not rows:
+        print(f"No refunds in the last {args.days} days.")
+        return
+    out = []
+    for r in rows:
+        per_unit = abs(r["amount"] / r["quantity"]) if r["quantity"] else abs(r["amount"])
+        # Compare against what you PAID for that item, not against the refund
+        # line's own unit price -- which is the same number, and tells you
+        # nothing. Refunding the full price is a return; a fraction of it is
+        # a price adjustment.
+        paid_row = con.execute(
+            "SELECT l.unit_price FROM lines l JOIN purchases p ON p.id = l.purchase_id"
+            " WHERE l.item_number = ? AND p.purchased_at <= ?"
+            "   AND (p.transaction_type IS NULL OR p.transaction_type != 'Refund')"
+            " ORDER BY p.purchased_at DESC LIMIT 1",
+            (r["item_number"], r["purchased_at"])).fetchone()
+        paid = paid_row["unit_price"] if paid_row else None
+        if not paid:
+            kind = "unknown"
+        elif abs(per_unit - paid) < 0.01:
+            kind = "return"
+        else:
+            kind = "adjustment"
+        out.append([day(r["purchased_at"]), r["item_number"], (r["name"] or "")[:34],
+                    qty(r["quantity"]), money(r["amount"]), money(per_unit), kind])
+    table(out, ["Refunded", "Item", "Name", "Qty", "Amount", "Per unit", "Looks like"],
+          right={3, 4, 5})
+    total = sum(r["amount"] for r in rows)
+    print(f"\n{money(total)} refunded over {args.days} days. A refund for the full unit price is a "
+          "return; a fraction of it is a price adjustment.")
+
+
+def cmd_summary(args, con):
+    if args.off:
+        db.set_meta(con, "summary_days", "0")
+        con.commit()
+        print("Summary emails off.")
+        return
+    if args.days is not None:
+        if args.days < 1:
+            sys.exit("--days must be 1 or more; use --off to stop them.")
+        db.set_meta(con, "summary_days", str(args.days))
+        con.commit()
+        print(f"Summary every {args.days} day(s).")
+        return
+    every = summary_interval(con) or DEFAULT_SUMMARY_DAYS
+    if args.send:
+        notify.send(con, "Costco summary", summary_text(con, UNCHECKED, days=every))
+        db.set_meta(con, "last_summary", date.today().isoformat())
+        con.commit()
+        print(f"Sent, and the clock reset: next one in {every} day(s).")
+        return
+    print(f"Emailed every {every} day(s).\n" if summary_interval(con) else "Summary emails are off.\n")
+    print(summary_text(con, UNCHECKED, days=every))
+
+
 def cmd_notify(args, con):
     if args.action == "email":
         print("Email alerts. For Gmail, create an app password at myaccount.google.com/apppasswords.")
@@ -543,27 +616,6 @@ def cmd_notify(args, con):
               "Sending a test message...")
         notify.send(con, "costco-cli", "Email alerts are set up.")
         print("Sent.")
-    elif args.action == "summary":
-        if args.off:
-            db.set_meta(con, "summary_days", "0")
-            con.commit()
-            print("Summary emails off.")
-        elif args.days is not None:
-            if args.days < 1:
-                sys.exit("--days must be 1 or more; use --off to stop them.")
-            db.set_meta(con, "summary_days", str(args.days))
-            con.commit()
-            print(f"Summary every {args.days} day(s).")
-        elif args.send:
-            every = summary_interval(con) or DEFAULT_SUMMARY_DAYS
-            notify.send(con, "Costco summary", summary_text(con, UNCHECKED, days=every))
-            db.set_meta(con, "last_summary", date.today().isoformat())
-            con.commit()
-            print(f"Sent, and the clock reset: next one in {every} day(s).")
-        else:
-            every = summary_interval(con)
-            print(f"Emailed every {every} day(s).\n" if every else "Summary emails are off.\n")
-            print(summary_text(con, UNCHECKED, days=every or DEFAULT_SUMMARY_DAYS))
     elif args.action == "test":
         used = notify.send(con, "costco-cli", "Test alert.")
         print(f"Sent via {used}.")
@@ -604,8 +656,20 @@ def add_range(p, default_days):
     p.add_argument("--year", type=int, help="a calendar year, e.g. 2026")
 
 
+EPILOG = """\
+Grouped, since the list above is alphabetical by accident:
+
+  money waiting    drops · claim · settled · refunds · returns · coupons
+  your purchases   receipts · item · spend
+  setup            login · sync · notify · summary · schedule · worker · server
+
+Run costco with no command for where things stand right now.
+"""
+
+
 def build_parser():
-    ap = argparse.ArgumentParser(prog="costco", description=__doc__)
+    ap = argparse.ArgumentParser(prog="costco", description=__doc__, epilog=EPILOG,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"costco-cli {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
@@ -644,13 +708,19 @@ def build_parser():
     p.add_argument("--note", help="anything worth remembering")
     p.set_defaults(fn=cmd_claim)
 
-    p = sub.add_parser("claims", help="price adjustments you have already settled")
+    p = sub.add_parser("settled", help="price adjustments you have already settled")
     p.add_argument("--limit", type=int, default=None, help="show only the most recent N")
-    p.set_defaults(fn=cmd_claims)
+    p.set_defaults(fn=cmd_settled)
+
+    p = sub.add_parser("refunds", help="returns and price adjustments Costco actually refunded")
+    p.add_argument("--days", type=int, default=90, help="how far back to look, default 90")
+    p.set_defaults(fn=cmd_refunds)
 
     p = sub.add_parser("drops", help="price drops you can claim on recent purchases")
     p.add_argument("--all", action="store_true", help="include drops already settled")
     p.add_argument("--no-refresh", dest="refresh", action="store_false", help="use stored prices, skip lookups")
+    p.add_argument("--refresh", dest="force_refresh", action="store_true",
+                   help="fetch prices again even if already done today")
     p.set_defaults(fn=cmd_drops)
 
     p = sub.add_parser("coupons", help="current warehouse coupon book")
@@ -659,13 +729,15 @@ def build_parser():
     p.set_defaults(fn=cmd_coupons)
 
     p = sub.add_parser("notify", help="where alerts go: macOS notifications or email")
-    p.add_argument("action", choices=["status", "email", "summary", "test", "macos"],
+    p.add_argument("action", choices=["status", "email", "test", "macos"],
                    nargs="?", default="status")
-    p.add_argument("--days", type=int, help="summary: send one every N days")
-    p.add_argument("--off", action="store_true", help="summary: stop sending them")
-    p.add_argument("--send", action="store_true", help="summary: email it now, whenever the last one went")
     p.set_defaults(fn=cmd_notify)
 
+    p = sub.add_parser("summary", help="the periodic digest: print it, send it, or change how often")
+    p.add_argument("--days", type=int, help="send one every N days")
+    p.add_argument("--off", action="store_true", help="stop sending them")
+    p.add_argument("--send", action="store_true", help="email it now, whenever the last one went")
+    p.set_defaults(fn=cmd_summary)
     p = sub.add_parser("schedule", help="run sync + drop alerts daily in the background")
     p.add_argument("action", choices=["install", "uninstall", "status"], nargs="?", default="status")
     p.add_argument("--time", default="07:00", help="HH:MM, default 07:00")
