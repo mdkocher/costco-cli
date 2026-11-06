@@ -8,7 +8,7 @@ import json
 import sys
 from datetime import date, datetime, timedelta
 
-from . import __version__, auth, config, db, lh, notify, prices, schedule, sync
+from . import __version__, auth, config, db, lh, notify, ops, prices, schedule, sync
 from .api import ApiError
 
 
@@ -626,6 +626,44 @@ def worker_running():
         return False
 
 
+def cmd_worker(args, con):
+    """The task worker: without it, nudges queue instead of arriving."""
+    if args.action == "install":
+        path, cmd = ops.worker_install()
+        print(f"Worker installed: {cmd}\nPlist: {path}\nLog: {config.LOG_DIR / 'worker.log'}")
+        print("It restarts itself if it dies, and waits if the server is down.")
+    elif args.action == "uninstall":
+        print("Removed." if ops.worker_uninstall() else "No worker agent installed.")
+    else:
+        installed, loaded, running = ops.worker_status()
+        if not installed:
+            print("Not installed — costco worker install")
+        else:
+            print(f"Installed, {'loaded' if loaded else 'NOT loaded'}, "
+                  f"{'running' if running else 'NOT running'}")
+            print(f"Log: {config.LOG_DIR / 'worker.log'}")
+    return 0
+
+
+def cmd_server(args, con):
+    """The LittleHorse server, which holds the claim timers."""
+    if args.action == "start":
+        try:
+            print(f"Server: {ops.server_start()}.")
+        except RuntimeError as e:
+            sys.exit(str(e))
+        print("It takes about 20 seconds to accept work. Dashboard: http://localhost:8080")
+    elif args.action == "stop":
+        print("Stopped." if ops.server_stop() else "Not running.")
+    else:
+        state = ops.server_state()
+        print({"running": "Running. Dashboard: http://localhost:8080",
+               "stopped": "Stopped — costco server start",
+               "absent": "No container yet — costco server start",
+               "no-docker": "Docker is not running. Start Docker Desktop first."}[state])
+    return 0
+
+
 def cmd_status(args, con):
     """Where things stand — what bare `costco` shows.
 
@@ -669,8 +707,10 @@ def cmd_status(args, con):
     print("\nClaim tracking")
     ok, detail = server_reachable()
     print(f"  server         {'reachable' if ok else 'DOWN — ' + detail}")
-    print(f"  worker         {'running' if worker_running() else 'NOT running'}")
-    if not (ok and worker_running()):
+    w_installed, _, w_running = ops.worker_status()
+    print(f"  worker         {'running' if w_running else 'NOT running'}"
+          f"{'' if w_installed else '  (not installed — costco worker install)'}")
+    if not (ok and w_running):
         print("  Reminders will not fire until both are up.")
     return 0
 
@@ -750,7 +790,7 @@ Run costco with no command for where things stand right now.
 def build_parser():
     ap = argparse.ArgumentParser(prog="costco", description=__doc__, epilog=EPILOG,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"costco-cli {__version__}")
+    ap.add_argument("--version", action="version", version=ops.version_line(__version__))
     ap.set_defaults(fn=cmd_status)
     sub = ap.add_subparsers(dest="cmd", required=False, metavar="<command>")
 
@@ -819,6 +859,14 @@ def build_parser():
     p.add_argument("--off", action="store_true", help="stop sending them")
     p.add_argument("--send", action="store_true", help="email it now, whenever the last one went")
     p.set_defaults(fn=cmd_summary)
+    p = sub.add_parser("worker", help="the task worker that delivers reminders")
+    p.add_argument("action", choices=["status", "install", "uninstall"], nargs="?", default="status")
+    p.set_defaults(fn=cmd_worker)
+
+    p = sub.add_parser("server", help="the LittleHorse server that holds the claim timers")
+    p.add_argument("action", choices=["status", "start", "stop"], nargs="?", default="status")
+    p.set_defaults(fn=cmd_server)
+
     p = sub.add_parser("schedule", help="run sync + drop alerts daily in the background")
     p.add_argument("action", choices=["install", "uninstall", "status"], nargs="?", default="status")
     p.add_argument("--time", default="07:00", help="HH:MM, default 07:00")

@@ -1,3 +1,4 @@
+import pathlib
 import argparse
 import re
 from datetime import date, timedelta
@@ -913,10 +914,11 @@ def _status_con():
     return con
 
 
-def _quiet_checks(monkeypatch, reachable=True, worker=True):
+def _quiet_checks(monkeypatch, reachable=True, worker=True, installed=True):
+    """Keep the status view off the network and off the process table."""
     from costco_cli import cli
     monkeypatch.setattr(cli, "server_reachable", lambda timeout=2.0: (reachable, "ConnectionError"))
-    monkeypatch.setattr(cli, "worker_running", lambda: worker)
+    monkeypatch.setattr(cli.ops, "worker_status", lambda: (installed, worker, worker))
     return cli
 
 
@@ -965,3 +967,56 @@ def test_plurals_read_correctly():
     assert cli.plural(1, "purchase") == "1 purchase"
     assert cli.plural(2, "purchase") == "2 purchases"
     assert cli.plural(0, "drop") == "0 drops"
+
+
+def test_status_points_at_install_when_the_worker_agent_is_missing(monkeypatch, capsys):
+    cli = _quiet_checks(monkeypatch, worker=False, installed=False)
+    cli.cmd_status(argparse.Namespace(), _status_con())
+    assert "costco worker install" in capsys.readouterr().out
+
+
+# ---------- the installed copy vs the source ----------
+
+def test_a_changed_source_reads_as_stale(monkeypatch, tmp_path):
+    """`git push` does not change what runs at 07:00; this is what notices."""
+    from costco_cli import ops
+    installed = tmp_path / "installed" / "costco_cli"
+    source = tmp_path / "repo" / "src" / "costco_cli"
+    for d in (installed, source):
+        d.mkdir(parents=True)
+        (d / "cli.py").write_text("print('one')\n")
+    monkeypatch.setattr(ops, "_pipx_source", lambda: tmp_path / "repo")
+    monkeypatch.setattr(ops, "costco_cli", None, raising=False)
+
+    import costco_cli
+    monkeypatch.setattr(costco_cli, "__file__", str(installed / "__init__.py"))
+    assert ops.staleness()[0] is False
+
+    (source / "cli.py").write_text("print('two')\n")
+    assert ops.staleness()[0] is True
+
+
+def test_an_editable_install_is_never_stale(monkeypatch, tmp_path):
+    """One copy, so there is nothing to drift."""
+    from costco_cli import ops
+    pkg = tmp_path / "repo" / "src" / "costco_cli"
+    pkg.mkdir(parents=True)
+    (pkg / "cli.py").write_text("x = 1\n")
+    monkeypatch.setattr(ops, "_pipx_source", lambda: tmp_path / "repo")
+    import costco_cli
+    monkeypatch.setattr(costco_cli, "__file__", str(pkg / "__init__.py"))
+    assert ops.staleness() is None
+
+
+def test_version_line_says_how_to_fix_a_stale_copy(monkeypatch):
+    from costco_cli import ops
+    monkeypatch.setattr(ops, "staleness", lambda: (True, pathlib.Path("/repo"), "aaa", "bbb"))
+    line = ops.version_line("0.1.0")
+    assert "out of date" in line and "pipx install --force /repo" in line
+
+
+def test_version_line_is_quiet_when_current(monkeypatch):
+    from costco_cli import ops
+    monkeypatch.setattr(ops, "staleness", lambda: (False, pathlib.Path("/repo"), "aaa", "aaa"))
+    line = ops.version_line("0.1.0")
+    assert "out of date" not in line and "build aaa" in line
