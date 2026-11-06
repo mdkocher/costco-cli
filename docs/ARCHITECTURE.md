@@ -17,7 +17,7 @@ flowchart TB
         direction TB
         sync["1 · Sync<br/>receipts, gas, online orders"]
         drops["2 · Find drops<br/>coupon book · your own later receipts"]
-        alert["3 · Alert on new drops<br/>'Settle it: costco claim 1707952'"]
+        alert["3 · Alert on new drops<br/>carries the exact command"]
         recon["4 · Reconcile claim runs<br/>one per unsettled drop · idempotent"]
         summary["5 · Summary every 7 days<br/>bought · waiting · settled · refunds"]
         sync --> drops --> alert --> recon --> summary
@@ -31,7 +31,7 @@ flowchart TB
     subgraph lh["LittleHorse"]
         direction TB
         server["lh-standalone<br/>Docker · Kafka + RocksDB<br/>localhost:2023"]
-        worker["costco-worker<br/>Python 3.12 · same venv"]
+        worker["costco-worker<br/>LaunchAgent, KeepAlive"]
         server <--> worker
     end
 
@@ -61,8 +61,8 @@ worker that goes away.
 ```mermaid
 flowchart LR
     d0(["Day 0<br/>run starts<br/>User Task opens"])
-    d23(["Day 23<br/>first nudge<br/>7 days left"])
-    d29(["Day 29<br/>final nudge<br/>1 day left"])
+    d23(["Day 23<br/>'Reminder: 7 days left'"])
+    d29(["Day 29<br/>'Reminder: 1 day left'"])
     d30(["Day 30<br/>window shuts<br/>recorded expired"])
     you["You: costco claim<br/>at any point"]
     done(["recorded claimed<br/>or skipped"])
@@ -101,18 +101,18 @@ machine that cannot reach the server is the normal case, not the edge case.
 One interpreter, one venv: the SDK ships with the CLI.
 
 ```bash
-python3.12 -m venv .venv && ./.venv/bin/pip install -e '.[dev]'
-
-docker run --name lh-standalone -d -v lh-data:/data -e KAFKA_DATA_DIR=/data/kafka \
-  -p 2023:2023 -p 8080:8080 -p 9092:9092 \
-  ghcr.io/littlehorse-enterprises/littlehorse/lh-standalone:1.3.1
-
-./.venv/bin/costco-worker
+costco server start    # pinned image, persistent volume, the right env vars
+costco worker install  # LaunchAgent: restarts itself, waits when the server is down
 ```
 
-`KAFKA_DATA_DIR` is not optional. The image's entrypoint sets `KAFKA_LOG_DIR` but tests
-`KAFKA_DATA_DIR`, so without it Kafka is reformatted with a new cluster id on every boot
-and a persistent volume makes the second start fail outright.
+Both wrap what used to be copy-pasted. `costco server` and `costco worker`
+report state; bare `costco` shows both alongside the money waiting.
+
+`costco server start` passes `KAFKA_DATA_DIR` for you, which matters more than it
+looks: the image's entrypoint sets `KAFKA_LOG_DIR` but tests `KAFKA_DATA_DIR`, so
+without it Kafka is reformatted with a new cluster id on every boot and a persistent
+volume makes the second start fail outright. A flag you never type is a flag you
+cannot forget.
 
 The dashboard at `localhost:8080` is an ops console, not a task inbox — it can show a
 pending User Task but offers no way to complete one. That is what `costco claim` is for.

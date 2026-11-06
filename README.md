@@ -64,8 +64,12 @@ costco schedule install   # daily sync + notifications at 07:00
 | `costco coupons [search] [--mine]` | Current warehouse coupon book. |
 | `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
 | `costco claim [item] [--skip] [--purchase ID] [--note ...]` | Settle a price adjustment; omit the item to pick from a list. |
-| `costco claims [--limit N]` | Adjustments you have already settled. |
-| `costco notify [status\|email\|summary\|test\|macos]` | Where alerts go; `summary` previews or schedules the digest. |
+| `costco settled [--limit N]` | Adjustments you have already settled. |
+| `costco refunds [--days 90]` | What Costco actually refunded: returns and adjustments. |
+| `costco notify [status\|email\|test\|macos]` | Where alerts go. |
+| `costco summary [--send\|--days N\|--off]` | The periodic digest: print, send, or reschedule. |
+| `costco worker [status\|install\|uninstall]` | The task worker that delivers reminders. |
+| `costco server [status\|start\|stop]` | The LittleHorse server that holds the timers. |
 
 ## Alerts
 
@@ -111,10 +115,10 @@ nothing:
   often it arrives:
 
   ```bash
-  costco notify summary            # print it now
-  costco notify summary --send     # email it now, to see what actually lands
-  costco notify summary --days 1   # every morning instead
-  costco notify summary --off
+  costco summary            # print it now
+  costco summary --send     # email it now, to see what actually lands
+  costco summary --days 1   # every morning instead
+  costco summary --off
   ```
 
   `Tracking` says `not checked (nothing waiting)` on a quiet period: with no
@@ -123,6 +127,16 @@ nothing:
 
 So no mail between one weekly note and the next means something is wrong,
 rather than just a quiet month at Costco.
+
+## Where things stand
+
+```bash
+costco
+```
+
+With no command it leads with the money waiting and its deadlines, then what it
+has synced, where alerts go, and whether the pieces that deliver reminders are
+actually up. `costco --help` is still there for the command list.
 
 ## Settling claims
 
@@ -148,7 +162,7 @@ Or name the item directly, which is what the alerts tell you to do:
 ```bash
 costco claim 1707952         # you got it back
 costco claim 1707952 --skip  # not worth the trip
-costco claims                # what you have settled, and what it came to
+costco settled               # what you have settled, and what it came to
 ```
 
 Settled items drop off `costco drops` (use `--all` to see them anyway). If the
@@ -160,7 +174,7 @@ That much is just bookkeeping. To be *nudged* a week and a day before a window
 closes, a [LittleHorse](https://littlehorse.io) workflow holds one run per
 claimable purchase line, with a User Task open until you answer it.
 
-SQLite stays the record — `costco claims` never needs a server — and the daily
+SQLite stays the record — `costco settled` never needs a server — and the daily
 sync reconciles, so a server that loses everything is rebuilt from your own
 database the next morning. But claim tracking is part of the tool, not an
 add-on: the SDK is a core dependency, which is why the CLI pins to Python
@@ -185,9 +199,17 @@ needs about half a minute after the container answers), registers the workflow,
 and handles the reminders until you stop it:
 
 ```bash
-./.venv/bin/costco-worker
+costco server start    # pinned image, persistent volume, the right env vars
+costco worker install  # a LaunchAgent that restarts itself if it dies
+```
+
+Both report with `costco server` and `costco worker`, and bare `costco` shows
+whether they are up. To run the worker in the foreground instead:
+
+```bash
+costco-worker
 waiting for the LittleHorse server...
-registered costco-price-adjustment; serving costco-notify-drop and costco-record-claim
+registered costco-price-adjustment; serving costco-nudge-claim and costco-record-claim
 ```
 
 If the server is unreachable, `costco claim` still records the outcome — SQLite
