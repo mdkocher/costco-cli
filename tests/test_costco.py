@@ -1063,3 +1063,89 @@ def test_the_summary_is_silent_when_everything_was_alerted():
     finally:
         cli.open_claims = cli_open
     assert "never alerted" not in text
+
+
+# ---------- browsing other shoppers' finds ----------
+
+FEED_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+ <channel>
+  <item>
+   <title>New Product: Kirkland Signature Macadamia Nut Cookies</title>
+   <link>https://costco97.com/a/</link>
+   <category>New Products</category><category>Food</category>
+   <category>Concord, CA</category><category>Lacey, WA</category>
+   <description>Buttery shortbread.</description>
+   <content:encoded>Was $19.99, now $14.98, save $5.01</content:encoded>
+  </item>
+  <item>
+   <title>Nutella Peanut Spread</title>
+   <link>https://costco97.com/b/</link>
+   <category>Food</category><category>Deals</category>
+   <description>Hazelnut and peanut.</description>
+   <content:encoded>Save $0.15 — now $7.49</content:encoded>
+  </item>
+  <item>
+   <title>Wilson NBA Golden Signature Basketball</title>
+   <link>https://costco97.com/c/</link>
+   <category>New Products</category><category>Home</category>
+   <description>A basketball.</description>
+  </item>
+ </channel>
+</rss>"""
+
+
+def test_the_feed_parses_without_the_network():
+    from costco_cli import finds
+    items = finds.parse(FEED_XML)
+    assert [i["title"] for i in items] == [
+        "Kirkland Signature Macadamia Nut Cookies", "Nutella Peanut Spread",
+        "Wilson NBA Golden Signature Basketball"]
+    assert items[1]["deal"] is True and items[0]["deal"] is False
+
+
+def test_warehouse_tags_are_dropped_from_the_kind():
+    """A single item carries hundreds of 'stocked here' tags; they are not a
+    kind of thing, and they are not prices either."""
+    from costco_cli import finds
+    kinds = finds.parse(FEED_XML)[0]["kinds"]
+    assert kinds == ["New Products", "Food"]
+    assert not any("," in k for k in kinds)
+
+
+def test_no_price_is_carried_at_all():
+    """A deal post holds the sale price, the regular price and the saving with
+    nothing to tell them apart -- picking one produced "$0.15 Nutella"."""
+    from costco_cli import finds
+    assert all("price" not in i for i in finds.parse(FEED_XML))
+
+
+def test_tokens_ignore_packaging_words():
+    from costco_cli import finds
+    assert finds.tokens("Kirkland 24 Count Variety Pack Box") == {"kirkland"}
+
+
+def test_a_single_shared_word_is_not_a_match():
+    """'plus' matched a Keurig and 'degrees' a heated jacket."""
+    from costco_cli import finds
+    items = finds.parse(FEED_XML)
+    assert finds.rank(items, {"signature"}) == []
+    assert len(finds.rank(items, {"signature"}, min_hits=1)) == 2
+
+
+def test_matches_are_ranked_by_how_much_they_share():
+    from costco_cli import finds
+    items = finds.parse(FEED_XML)
+    ranked = finds.rank(items, {"macadamia", "nut", "cookies", "nutella", "peanut"})
+    assert ranked[0][1]["title"].startswith("Kirkland")      # three words shared
+    assert ranked[1][1]["title"] == "Nutella Peanut Spread"  # two
+    assert ranked[0][0] == ["cookies", "macadamia", "nut"]
+
+
+def test_vocabulary_comes_from_what_you_actually_bought():
+    from costco_cli import finds
+    con = db.connect(":memory:")
+    db.save_warehouse_receipt(con, receipt("2026-10-20T12:00:00",
+                                           [line("1707952", "KSOXI POWDER", 2, 29.98)], "R1"))
+    vocab = finds.vocabulary(con)
+    assert "ksoxi" in vocab and "powder" in vocab

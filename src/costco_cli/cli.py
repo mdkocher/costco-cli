@@ -8,7 +8,7 @@ import json
 import sys
 from datetime import date, datetime, timedelta
 
-from . import __version__, auth, config, db, lh, notify, ops, prices, schedule, sync
+from . import __version__, auth, config, db, finds, lh, notify, ops, prices, schedule, sync
 from .api import ApiError
 
 
@@ -723,6 +723,40 @@ def cmd_status(args, con):
     return 0
 
 
+def cmd_finds(args, con):
+    """Browse-only, on purpose.
+
+    Costco97's feed is national, carries no item numbers, and does not cover
+    Bend — so this can never justify a trip, let alone a claim. It stays out of
+    the alerts and the summary, which only carry money waiting and things that
+    are broken. That is the whole reason those are worth reading.
+    """
+    try:
+        items = finds.fetch()
+    except Exception as e:
+        sys.exit(f"Could not reach costco97.com ({type(e).__name__}). Nothing else is affected.")
+    if not args.all:
+        matched = finds.rank(items, finds.vocabulary(con))
+        if not matched:
+            print(f"Nothing in the latest {len(items)} posts matches what you buy. "
+                  f"See them all with --all.")
+            return 0
+        rows = [[it["title"][:46], ", ".join(it["kinds"])[:24],
+                 "deal" if it["deal"] else "", ", ".join(hits[:3])]
+                for hits, it in matched[:args.limit]]
+        table(rows, ["Item", "Kind", "", "Matched on"])
+        print(f"\n{len(matched)} of {len(items)} recent posts look related to things you buy.")
+    else:
+        rows = [[it["title"][:50], ", ".join(it["kinds"])[:26],
+                 "deal" if it["deal"] else ""] for it in items[:args.limit]]
+        table(rows, ["Item", "Kind", ""])
+        print(f"\n{len(items)} recent posts.")
+    print("Spotted by shoppers elsewhere. No prices here on purpose: the feed does not "
+          "distinguish\na sale price from the saving. Stock and prices vary by warehouse, "
+          "and Bend is not covered.\ncostco97.com")
+    return 0
+
+
 def cmd_notify(args, con):
     if args.action == "email":
         print("Email alerts. For Gmail, create an app password at myaccount.google.com/apppasswords.")
@@ -787,7 +821,7 @@ def add_range(p, default_days):
 EPILOG = """\
 Grouped, since the list above is alphabetical by accident:
 
-  money waiting    drops · claim · settled · refunds · returns · coupons
+  money waiting    drops · claim · settled · refunds · returns · coupons\n  browsing         finds
   your purchases   receipts · item · spend
   setup            login · sync · notify · summary · schedule · worker · server
 
@@ -856,6 +890,11 @@ def build_parser():
     p.add_argument("search", nargs="?")
     p.add_argument("--mine", action="store_true", help="only items you've bought before")
     p.set_defaults(fn=cmd_coupons)
+
+    p = sub.add_parser("finds", help="new and discounted items shoppers spotted, matched to what you buy")
+    p.add_argument("--all", action="store_true", help="show everything, not just matches")
+    p.add_argument("--limit", type=int, default=15, help="how many to show, default 15")
+    p.set_defaults(fn=cmd_finds)
 
     p = sub.add_parser("notify", help="where alerts go: macOS notifications or email")
     p.add_argument("action", choices=["status", "email", "test", "macos"],

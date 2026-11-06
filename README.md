@@ -66,6 +66,7 @@ costco schedule install   # daily sync + notifications at 07:00
 | `costco claim [item] [--skip] [--purchase ID] [--note ...]` | Settle a price adjustment; omit the item to pick from a list. |
 | `costco settled [--limit N]` | Adjustments you have already settled. |
 | `costco refunds [--days 90]` | What Costco actually refunded: returns and adjustments. |
+| `costco finds [--all] [--limit N]` | New and discounted items shoppers spotted, matched to what you buy. |
 | `costco notify [status\|email\|test\|macos]` | Where alerts go. |
 | `costco summary [--send\|--days N\|--off]` | The periodic digest: print, send, or reschedule. |
 | `costco worker [status\|install\|uninstall]` | The task worker that delivers reminders. |
@@ -214,6 +215,24 @@ registered costco-price-adjustment; serving costco-nudge-claim and costco-record
 
 If the server is unreachable, `costco claim` still records the outcome — SQLite
 is the record — and says plainly that reminders may continue until the deadline.
+
+## Browsing what others found
+
+```bash
+costco finds          # matched against what you buy
+costco finds --all    # everything in the feed
+```
+
+Reads [costco97.com](https://costco97.com)'s public feed, where shoppers post new
+and discounted items, and keeps the ones sharing at least two distinctive words
+with your own purchase history.
+
+It is browse-only on purpose, and stays out of the alerts and the summary. The
+feed is national, carries no item numbers, and does not cover Bend — its
+warehouse tags mean "stocked here", not "on clearance here at this price". It
+shows no prices either: a deal post contains the sale price, the regular price
+and the saving with nothing to tell them apart, and a confident wrong price is
+worse than none. Follow the link for the real figure.
 
 ## Running on an always-on Mac
 
