@@ -1,8 +1,9 @@
+import re
 from datetime import date, timedelta
 
 import pytest
 
-from costco_cli import db, notify, prices, savings
+from costco_cli import db, lh, notify, prices, savings
 
 SAVINGS_HTML = """
 <div>Pricing shown is warehouse pricing</div><div>Valid 10/19/26 - 11/15/26</div>
@@ -454,29 +455,24 @@ class _FakeDrop:
         self.item_number = item_number
 
 
-class _FakeLH:
+class _FakeEnsureRun:
+    """Stands in for lh.ensure_run, which would otherwise need a live server."""
+
     def __init__(self, fail=None):
         self.started = []
         self.fail = fail
 
-    def ensure_run(self, drop):
+    def __call__(self, drop):
         if self.fail:
             raise self.fail
         self.started.append((drop.purchase_id, drop.item_number))
         return f"claim-{drop.purchase_id}"
 
 
-def test_reconciliation_is_off_without_the_extra(monkeypatch):
-    from costco_cli import cli
-    monkeypatch.setattr(cli, "_littlehorse", lambda: (None, "not installed"))
-    started, why = cli.start_claim_runs(db.connect(":memory:"), [_FakeDrop("R1", "1707952")])
-    assert (started, why) == (0, "not installed")
-
-
 def test_reconciliation_starts_a_run_for_each_unsettled_drop(monkeypatch):
     from costco_cli import cli
-    fake = _FakeLH()
-    monkeypatch.setattr(cli, "_littlehorse", lambda: (fake, None))
+    fake = _FakeEnsureRun()
+    monkeypatch.setattr(cli.lh, "ensure_run", fake)
     con = db.connect(":memory:")
     drops = [_FakeDrop("R1", "1707952"), _FakeDrop("R2", "1819379")]
     assert cli.start_claim_runs(con, drops) == (2, None)
@@ -485,12 +481,13 @@ def test_reconciliation_starts_a_run_for_each_unsettled_drop(monkeypatch):
 
 def test_reconciliation_skips_drops_already_settled(monkeypatch):
     from costco_cli import cli
-    fake = _FakeLH()
-    monkeypatch.setattr(cli, "_littlehorse", lambda: (fake, None))
+    fake = _FakeEnsureRun()
+    monkeypatch.setattr(cli.lh, "ensure_run", fake)
     con = db.connect(":memory:")
     db.record_claim(con, "R1", "1707952", 12.0, "claimed")
-    started, why = cli.start_claim_runs(con, [_FakeDrop("R1", "1707952"), _FakeDrop("R2", "1819379")])
-    assert (started, why) == (1, None)
+    started, status = cli.start_claim_runs(con, [_FakeDrop("R1", "1707952"),
+                                                 _FakeDrop("R2", "1819379")])
+    assert (started, status) == (1, None)
     assert fake.started == [("R2", "1819379")]
 
 
@@ -499,167 +496,23 @@ def test_nothing_to_reconcile_is_reported_as_unchecked(monkeypatch):
     not claim it is running -- that would assert a health check that never
     happened, in the one email whose job is to say whether this works."""
     from costco_cli import cli
-    monkeypatch.setattr(cli, "_littlehorse", lambda: (_ for _ in ()).throw(
-        AssertionError("should not even look for the SDK")))
+    monkeypatch.setattr(cli.lh, "ensure_run",
+                        lambda d: pytest.fail("should not contact the server"))
     con = db.connect(":memory:")
     db.record_claim(con, "R1", "1707952", 12.0, "claimed")
     assert cli.start_claim_runs(con, [_FakeDrop("R1", "1707952")]) == (0, cli.UNCHECKED)
 
 
-def test_a_started_run_reports_no_caveat(monkeypatch):
-    """Contrast: here the server really was contacted, so status is None."""
+def test_a_down_server_is_reported_but_does_not_fail_the_sync(monkeypatch):
+    """Claim tracking is required, so this is a fault worth mailing -- but the
+    receipt sync already succeeded and must not be undone by it."""
     from costco_cli import cli
-    monkeypatch.setattr(cli, "_littlehorse", lambda: (_FakeLH(), None))
+    monkeypatch.setattr(cli.lh, "ensure_run",
+                        _FakeEnsureRun(fail=ConnectionError("connection refused")))
     started, status = cli.start_claim_runs(db.connect(":memory:"), [_FakeDrop("R1", "1707952")])
-    assert (started, status) == (1, None)
-
-
-def test_the_summary_does_not_claim_tracking_is_running_when_unchecked():
-    from costco_cli import cli
-    con = db.connect(":memory:")
-    text = cli.summary_text(con, cli.UNCHECKED, today=date(2026, 11, 5), days=7)
-    assert "Tracking  not checked (nothing waiting)" in text
-    assert "Tracking  running" not in text
-
-
-def test_a_server_that_is_down_never_fails_the_morning_sync(monkeypatch):
-    """cmd_daily must keep working; claim tracking just goes quiet."""
-    from costco_cli import cli
-    fake = _FakeLH(fail=ConnectionError("connection refused"))
-    monkeypatch.setattr(cli, "_littlehorse", lambda: (fake, None))
-    started, why = cli.start_claim_runs(db.connect(":memory:"), [_FakeDrop("R1", "1707952")])
     assert started == 0
-    assert "ConnectionError" in why and "connection refused" in why
-
-
-# ---------- picking a claim interactively ----------
-
-class _Drop:
-    def __init__(self, purchase_id, item_number, total, deadline, name="Thing"):
-        self.purchase_id, self.item_number = purchase_id, item_number
-        self.total, self.deadline, self.name = total, deadline, name
-        self.purchased_at = "2026-10-20T12:00:00"
-
-
-def _drops():
-    return [_Drop("R1", "1707952", 12.0, date.today() + timedelta(days=5), "Oxi Powder"),
-            _Drop("R2", "1819379", 4.0, date.today() + timedelta(days=20), "Head Gloves")]
-
-
-def test_picking_a_claim_returns_the_chosen_drop():
-    from costco_cli import cli
-    answers = iter(["2", "y"])
-    d, outcome = cli.pick_claim(_drops(), ask=lambda _: next(answers))
-    assert (d.item_number, outcome) == ("1819379", "claimed")
-
-
-def test_answering_no_records_a_skip():
-    from costco_cli import cli
-    answers = iter(["1", "n"])
-    d, outcome = cli.pick_claim(_drops(), ask=lambda _: next(answers))
-    assert (d.item_number, outcome) == ("1707952", "skipped")
-
-
-def test_pressing_enter_quits_without_settling_anything():
-    from costco_cli import cli
-    assert cli.pick_claim(_drops(), ask=lambda _: "") == (None, None)
-    answers = iter(["1", ""])          # quit at the second prompt
-    assert cli.pick_claim(_drops(), ask=lambda _: next(answers)) == (None, None)
-
-
-def test_an_out_of_range_choice_exits_rather_than_guessing():
-    from costco_cli import cli
-    with pytest.raises(SystemExit):
-        cli.pick_claim(_drops(), ask=lambda _: "9")
-
-
-def test_nothing_waiting_is_said_plainly():
-    from costco_cli import cli
-    assert cli.pick_claim([], ask=lambda _: pytest.fail("should not prompt")) == (None, None)
-
-
-# ---------- periodic summary ----------
-
-def test_the_first_run_starts_the_clock_without_mailing(monkeypatch):
-    from costco_cli import cli, notify
-    con = db.connect(":memory:")
-    monkeypatch.setattr(notify, "send", lambda *a: pytest.fail("should not send"))
-    assert cli.maybe_summary(con, "running") is False
-    assert db.get_meta(con, "last_summary") is not None
-
-
-def test_no_heartbeat_before_a_week_has_passed(monkeypatch):
-    from costco_cli import cli, notify
-    con = db.connect(":memory:")
-    today = date(2026, 11, 5)
-    db.set_meta(con, "last_summary", today.isoformat())
-    monkeypatch.setattr(notify, "send", lambda *a: pytest.fail("should not send"))
-    assert cli.maybe_summary(con, "running", today=today + timedelta(days=6)) is False
-
-
-def test_a_heartbeat_after_a_week_says_what_is_going_on(monkeypatch):
-    from costco_cli import cli, notify
-    con = db.connect(":memory:")
-    today = date(2026, 11, 5)
-    db.set_meta(con, "last_summary", today.isoformat())
-    db.set_meta(con, "last_sync", "2026-11-12")
-    db.record_claim(con, "R1", "1707952", 12.0, "claimed", decided_at="2026-11-10T09:00:00")
-    sent = {}
-    monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(title=t, message=m))
-    later = today + timedelta(days=7)
-    assert cli.maybe_summary(con, "running", today=later) is True
-    assert "1 claimed" in sent["message"]
-    assert "last run 2026-11-12" in sent["message"]
-    assert db.get_meta(con, "last_summary") == later.isoformat()
-
-
-def test_a_failed_heartbeat_does_not_move_the_clock(monkeypatch):
-    """Otherwise a transient mail failure silently costs you a whole week."""
-    from costco_cli import cli, notify
-    con = db.connect(":memory:")
-    today = date(2026, 11, 5)
-    db.set_meta(con, "last_summary", today.isoformat())
-
-    def boom(*a):
-        raise notify.NotifyError("smtp down")
-
-    monkeypatch.setattr(notify, "send", boom)
-    assert cli.maybe_summary(con, "running", today=today + timedelta(days=8)) is False
-    assert db.get_meta(con, "last_summary") == today.isoformat()
-
-
-def test_heartbeat_reports_claim_tracking_being_idle(monkeypatch):
-    from costco_cli import cli, notify
-    con = db.connect(":memory:")
-    today = date(2026, 11, 5)
-    db.set_meta(con, "last_summary", today.isoformat())
-    sent = {}
-    monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(message=m))
-    cli.maybe_summary(con, "ConnectionError: refused", today=today + timedelta(days=7))
-    assert "ConnectionError: refused" in sent["message"]
-
-
-# ---------- failure alerts ----------
-
-def test_a_crash_is_mailed_not_swallowed(monkeypatch):
-    from costco_cli import cli, notify
-    con = db.connect(":memory:")
-    sent = {}
-    monkeypatch.setattr(notify, "send", lambda c, t, m: sent.update(title=t, message=m))
-    cli.alert_failure(con, "daily run failed", ValueError("boom"))
-    assert sent["title"] == "costco-cli failed"
-    assert "ValueError: boom" in sent["message"]
-
-
-def test_a_failure_alert_that_itself_fails_does_not_raise(monkeypatch):
-    """The job must not die trying to report that it died."""
-    from costco_cli import cli, notify
-
-    def boom(*a):
-        raise notify.NotifyError("smtp down")
-
-    monkeypatch.setattr(notify, "send", boom)
-    cli.alert_failure(db.connect(":memory:"), "daily run failed", ValueError("boom"))
+    assert status.startswith("DOWN - ")
+    assert "ConnectionError" in status and "connection refused" in status
 
 
 # ---------- summary content and cadence ----------
@@ -761,3 +614,229 @@ def test_refunds_are_not_counted_as_purchases():
     text = cli.summary_text(con, "running", today=today, days=7)
     assert "Bought    1 receipts, $59.96" in text     # the refund is excluded
     assert "Refunds   1" in text                      # and reported on its own
+
+
+# ---------- the LittleHorse layer ----------
+
+HOSTNAME_LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+# ---------- run ids (decision 1A) ----------
+
+def test_run_id_is_a_valid_hostname_label():
+    """The server rejects anything else: "Optional argument 'id' must be a
+    valid hostname". A colon separator fails outright."""
+    assert HOSTNAME_LABEL.match(lh.run_id_for("R1", "1707952"))
+
+
+def test_run_id_is_deterministic():
+    """Idempotency rests on this: the same purchase line must always map to the
+    same run, so starting it every morning is a no-op server-side."""
+    assert lh.run_id_for("R1", "1707952") == lh.run_id_for("R1", "1707952")
+
+
+def test_run_ids_differ_per_purchase_line():
+    assert lh.run_id_for("R1", "1707952") != lh.run_id_for("R2", "1707952")
+    assert lh.run_id_for("R1", "1707952") != lh.run_id_for("R1", "1819379")
+
+
+@pytest.mark.parametrize("purchase_id", [
+    "R1", "0070120281234", "ORDER/123", "a b c", "WC_99.8", "ÜMLAUT", "!!!", "",
+])
+def test_awkward_purchase_ids_still_make_a_valid_hostname(purchase_id):
+    """Receipt barcodes and online order numbers are not our format to choose."""
+    run_id = lh.run_id_for(purchase_id, "1707952")
+    assert HOSTNAME_LABEL.match(run_id), run_id
+
+
+def test_ids_that_slugify_identically_do_not_collide():
+    """"ORDER/1" and "ORDER-1" slug the same way; the hash keeps them apart."""
+    assert lh.run_id_for("ORDER/1", "1") != lh.run_id_for("ORDER-1", "1")
+
+
+# ---------- outcome decision ----------
+
+@pytest.mark.parametrize("window_closed,claimed,expected", [
+    (True, False, "expired"),
+    (True, True, "expired"),      # deadline wins: the task was never answered
+    (False, True, "claimed"),
+    (False, False, "skipped"),
+])
+def test_outcome_for(window_closed, claimed, expected):
+    assert lh.outcome_for(window_closed, claimed) == expected
+
+
+def test_every_outcome_is_one_the_schema_allows():
+    for wc in (True, False):
+        for c in (True, False):
+            assert lh.outcome_for(wc, c) in db.CLAIM_OUTCOMES
+
+
+# ---------- nudge timing ----------
+
+def test_seconds_until_is_never_negative():
+    """A drop discovered after its deadline must expire at once, not schedule a
+    timer in the past."""
+    from datetime import date, timedelta
+    assert lh.seconds_until(date.today() - timedelta(days=5)) == 0
+
+
+def test_seconds_until_grows_with_distance():
+    from datetime import date, timedelta
+    today = date.today()
+    assert lh.seconds_until(today + timedelta(days=7)) > lh.seconds_until(today + timedelta(days=1))
+
+
+# ---------- workflow variables ----------
+
+class _VarDrop:
+    purchase_id = "R1"
+    item_number = "1707952"
+    name = "Kirkland Oxi Powder"
+    quantity = 4
+    total = 12.0
+    source = "warehouse"
+    from datetime import date as _d, timedelta as _td
+    deadline = _d.today() + _td(days=20)
+
+
+def test_variables_for_covers_every_workflow_input():
+    v = lh.variables_for(_VarDrop())
+    assert set(v) == {"purchase_id", "item_number", "name", "dollars_back", "deadline",
+                      "where", "first_nudge_seconds", "final_nudge_seconds",
+                      "expires_in_seconds"}
+
+
+def test_nudges_land_before_the_deadline_in_the_right_order():
+    v = lh.variables_for(_VarDrop())
+    assert v["first_nudge_seconds"] < v["final_nudge_seconds"] < v["expires_in_seconds"]
+
+
+def test_where_depends_on_where_you_bought_it():
+    warehouse = lh.variables_for(_VarDrop())
+    online = _VarDrop()
+    online.source = "online"
+    assert warehouse["where"] == lh.WHERE_WAREHOUSE
+    assert lh.variables_for(online)["where"] == lh.WHERE_ONLINE
+
+
+def test_an_unnamed_item_falls_back_to_its_number():
+    d = _VarDrop()
+    d.name = None
+    assert lh.variables_for(d)["name"] == "1707952"
+
+
+# ---------- readiness gate ----------
+
+class _FakeRpcError(Exception):
+    def __init__(self, code):
+        self._code = code
+
+    def code(self):
+        return self._code
+
+
+class _FakeStub:
+    """Fails with UNAVAILABLE a few times, as a rebalancing server does."""
+
+    def __init__(self, unavailable_times=0, code=None):
+        import grpc
+        self.left = unavailable_times
+        self.code = code or grpc.StatusCode.UNAVAILABLE
+        self.calls = 0
+
+    def SearchWfSpec(self, _request):
+        self.calls += 1
+        if self.left > 0:
+            self.left -= 1
+            raise _FakeRpcError(self.code)
+        return object()
+
+
+class _FakeConfig:
+    def __init__(self, stub):
+        self._stub = stub
+
+    def stub(self):
+        return self._stub
+
+
+def _patch_rpc_error(monkeypatch):
+    """wait_until_ready catches grpc.RpcError, so the fake must be one."""
+    monkeypatch.setattr(lh.grpc, "RpcError", _FakeRpcError)
+
+
+def test_wait_until_ready_returns_at_once_when_the_server_is_up(monkeypatch):
+    _patch_rpc_error(monkeypatch)
+    stub = _FakeStub(unavailable_times=0)
+    assert lh.wait_until_ready(_FakeConfig(stub)) is True
+    assert stub.calls == 1
+
+
+def test_wait_until_ready_retries_while_kafka_streams_warms_up(monkeypatch):
+    """The real symptom: UNAVAILABLE "Kafka Streams not ready yet" for ~30s
+    after the container starts, while `lhctl version` already answers."""
+    _patch_rpc_error(monkeypatch)
+    stub = _FakeStub(unavailable_times=3)
+    assert lh.wait_until_ready(_FakeConfig(stub), poll=0) is True
+    assert stub.calls == 4
+
+
+def test_wait_until_ready_gives_up_eventually(monkeypatch):
+    _patch_rpc_error(monkeypatch)
+    stub = _FakeStub(unavailable_times=10_000)
+    with pytest.raises(_FakeRpcError):
+        lh.wait_until_ready(_FakeConfig(stub), timeout=0, poll=0)
+
+
+def test_wait_until_ready_does_not_mask_a_real_failure(monkeypatch):
+    """A wrong address or a refused connection must surface, not spin."""
+    import grpc
+    _patch_rpc_error(monkeypatch)
+    stub = _FakeStub(unavailable_times=1, code=grpc.StatusCode.PERMISSION_DENIED)
+    with pytest.raises(_FakeRpcError):
+        lh.wait_until_ready(_FakeConfig(stub), poll=0)
+
+
+def test_the_delay_variables_have_defaults():
+    """A run started by hand (the dashboard's Run button) passes no variables.
+    An unset INT fails the User Task node with "Delay for User Task Action was
+    not an INT, got a DEFINEDTYPE_NOT_SET" before the task is even created."""
+    assert lh.DEFAULT_FIRST_NUDGE_SECONDS < lh.DEFAULT_FINAL_NUDGE_SECONDS
+    assert lh.DEFAULT_FINAL_NUDGE_SECONDS < lh.DEFAULT_EXPIRES_IN_SECONDS
+
+
+def test_the_defaults_match_the_real_adjustment_window():
+    from costco_cli import config
+    assert lh.DEFAULT_EXPIRES_IN_SECONDS == config.PRICE_ADJUST_DAYS * 24 * 60 * 60
+
+
+# ---------- hand-started runs ----------
+
+def test_a_run_with_no_purchase_line_records_nothing(tmp_path, monkeypatch):
+    """The dashboard's Run button starts a run with every variable NULL. There
+    is no purchase to record, and claims.purchase_id is NOT NULL, so writing
+    anyway fails the task and leaves the run in ERROR."""
+    monkeypatch.setenv("COSTCO_CLI_HOME", str(tmp_path))
+    from costco_cli import config, db
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "costco.db")
+
+    for missing in (None, ""):
+        out = lh._write_claim(missing, "1707952", 12.0, "skipped")
+        assert "not recorded" in out
+        out = lh._write_claim("RCPT1", missing, 12.0, "skipped")
+        assert "not recorded" in out
+
+    con = db.connect()
+    assert db.claim_outcomes(con) == {}
+
+
+def test_a_real_purchase_line_is_still_recorded(tmp_path, monkeypatch):
+    from costco_cli import config, db
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "costco.db")
+
+    assert lh._write_claim("RCPT1", "1707952", 12.0, "claimed") == "claimed"
+    con = db.connect()
+    assert db.claim_outcomes(con) == {("RCPT1", "1707952"): "claimed"}

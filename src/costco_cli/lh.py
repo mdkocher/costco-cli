@@ -1,13 +1,16 @@
-"""Optional LittleHorse orchestration for the 30-day price-adjustment window.
+"""LittleHorse orchestration for the 30-day price-adjustment window.
 
-The CLI works without any of this. SQLite stays the record of what happened
-(`claims`); LittleHorse only drives the waiting: it alerts you to a drop, holds
-a User Task open until you claim it, nudges you twice, and gives up at the
-deadline. `costco claim` completes the User Task; `costco claims` reads SQLite
-and never needs the server.
+LittleHorse drives the waiting: it holds a User Task open from the morning a
+drop is found until you answer it, nudges you twice, and gives up at the
+deadline. `costco claim` completes that task.
 
-Requires the `littlehorse` extra. The SDK caps at Python <3.14, so the worker
-runs from its own interpreter; the rest of the CLI does not import this module.
+SQLite stays the record of what happened (`claims`), which is why `costco
+claims` answers without a server and why a server that loses everything is
+survivable -- the next morning's reconcile rebuilds a run per unsettled drop.
+That is resilience, not optionality: the SDK is a core dependency, and a server
+that cannot be reached is reported as a fault.
+
+The SDK caps at Python <3.14, which is what pins the whole CLI to 3.10-3.13.
 """
 import asyncio
 import hashlib

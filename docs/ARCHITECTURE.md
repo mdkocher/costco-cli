@@ -1,7 +1,8 @@
 # Architecture
 
 A local CLI that syncs your Costco receipts, spots items that got cheaper, and holds a
-durable 30-day reminder for each one. SQLite is the record; the workflow engine is optional.
+durable 30-day reminder for each one. SQLite is the record of truth; LittleHorse runs the
+waiting.
 
 ## 07:00 every morning
 
@@ -27,10 +28,10 @@ flowchart TB
     db[("SQLite · costco.db<br/>purchases · lines · items · coupons<br/>online_prices · claims · meta")]
     fail["Failure email<br/>so a crash is never silent"]
 
-    subgraph lh["Optional · LittleHorse"]
+    subgraph lh["LittleHorse"]
         direction TB
         server["lh-standalone<br/>Docker · Kafka + RocksDB<br/>localhost:2023"]
-        worker["costco-worker<br/>Python 3.12 · .venv-lh"]
+        worker["costco-worker<br/>Python 3.12 · same venv"]
         server <--> worker
     end
 
@@ -45,8 +46,11 @@ flowchart TB
     fail --> gmail
 ```
 
-Without LittleHorse the first three steps are unchanged, step 4 logs `claim tracking idle`,
-and `costco claim` still records outcomes. You lose the reminders, nothing else.
+LittleHorse is a required component: `littlehorse-client` is a core dependency and the CLI
+pins to Python 3.10–3.13 because of it. A server that is *unreachable* is a different thing
+from an absent one — it is a fault, reported and emailed, but it does not undo the receipt
+sync that already succeeded above. Those are unrelated concerns and failing one on the other
+would cost you purchase data for no reason.
 
 ## What happens to one claimable drop
 
@@ -86,25 +90,24 @@ machine that cannot reach the server is the normal case, not the edge case.
 
 | Failure | Effect |
 |---|---|
-| LittleHorse server down | The job logs `claim tracking idle`, finishes everything else, retries tomorrow. Run ids derive from the purchase line, so nothing starts twice. |
+| LittleHorse server down | Reported as `claim tracking DOWN` and emailed. Sync and drop detection still complete; the reconcile retries tomorrow. Run ids derive from the purchase line, so nothing starts twice. |
 | Worker down | Nudges and outcomes queue on the server and execute when a worker reappears. Reminders arrive late rather than never. |
 | Mail fails | The alert still shows as a macOS notification with the reason attached, then the error raises. |
 | Costco sign-in expired | Sync stops and mails you. The one failure that genuinely needs a human at the Mac. |
 | Nothing runs at all | Silence between one weekly summary and the next means something is wrong. That is what the summary is for. |
 
-## Running the optional half
+## Running the workflow half
 
-The LittleHorse SDK supports Python 3.10–3.13, while the CLI itself runs on anything from
-3.10 up — so the worker gets its own interpreter and the CLI never imports the SDK.
+One interpreter, one venv: the SDK ships with the CLI.
 
 ```bash
-python3.12 -m venv .venv-lh && ./.venv-lh/bin/pip install -e '.[littlehorse]'
+python3.12 -m venv .venv && ./.venv/bin/pip install -e '.[dev]'
 
 docker run --name lh-standalone -d -v lh-data:/data -e KAFKA_DATA_DIR=/data/kafka \
   -p 2023:2023 -p 8080:8080 -p 9092:9092 \
   ghcr.io/littlehorse-enterprises/littlehorse/lh-standalone:1.3.1
 
-./.venv-lh/bin/costco-worker
+./.venv/bin/costco-worker
 ```
 
 `KAFKA_DATA_DIR` is not optional. The image's entrypoint sets `KAFKA_LOG_DIR` but tests

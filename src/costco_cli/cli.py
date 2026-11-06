@@ -6,7 +6,7 @@ import json
 import sys
 from datetime import date, datetime, timedelta
 
-from . import __version__, auth, config, db, notify, prices, schedule, sync
+from . import __version__, auth, config, db, lh, notify, prices, schedule, sync
 from .api import ApiError
 
 
@@ -253,20 +253,6 @@ def notify_new_drops(con, drops):
     return fresh
 
 
-def _littlehorse():
-    """The optional LittleHorse module, or (None, why) if it is unavailable.
-
-    The SDK caps at Python <3.14 while this CLI runs on anything from 3.10 up,
-    so it is genuinely optional: everything here works without it, and claim
-    tracking is the only thing that goes quiet.
-    """
-    try:
-        from . import lh
-        return lh, None
-    except ImportError as e:
-        return None, f"the littlehorse extra is not installed for this interpreter ({e.name})"
-
-
 def start_claim_runs(con, drops):
     """Make sure every unsettled drop has a claim workflow.
 
@@ -276,7 +262,7 @@ def start_claim_runs(con, drops):
     server survivable -- SQLite stays the record either way.
 
     Returns (started, status): status is None when runs were actually started,
-    UNCHECKED when there was nothing to reconcile, or a reason it is off.
+    UNCHECKED when there was nothing to reconcile, or a "DOWN - ..." reason.
     """
     decided = db.claim_outcomes(con)
     todo = [d for d in drops if (d.purchase_id, d.item_number) not in decided]
@@ -284,18 +270,15 @@ def start_claim_runs(con, drops):
         # Nothing to reconcile, so the server was never contacted. Saying
         # "running" here would assert a health check that never happened.
         return 0, UNCHECKED
-    lh, why = _littlehorse()
-    if lh is None:
-        return 0, why
     started = 0
     for d in todo:
         try:
             if lh.ensure_run(d):
                 started += 1
         except Exception as e:
-            # grpc's exception types are not importable without the extra, and a
-            # server that is down must never fail the morning sync.
-            return started, f"{type(e).__name__}: {e}"
+            # The server being unreachable is a fault worth reporting, but it
+            # must not cost you the receipt sync -- those are unrelated concerns.
+            return started, f"DOWN - {type(e).__name__}: {e}"
     return started, None
 
 
@@ -362,10 +345,6 @@ def _settle(con, d, outcome, note=None):
     con.commit()
     print(f"{outcome.title()}: {money(d.total)} on {d.name or d.item_number}.")
 
-    lh, why = _littlehorse()
-    if lh is None:
-        print(f"  Nudges continue until {d.deadline}: {why}.")
-        return 0
     try:
         if lh.complete_claim(d.purchase_id, d.item_number,
                              claimed=(outcome == "claimed"), note=note):
@@ -373,7 +352,8 @@ def _settle(con, d, outcome, note=None):
         else:
             print("  Nothing open on the server for it, so there was nothing to close.")
     except Exception as e:
-        print(f"  Recorded locally, but could not reach LittleHorse ({e}); "
+        # Recorded either way: SQLite is the record, the workflow only nudges.
+        print(f"  Recorded, but could not reach LittleHorse ({e}); "
               f"reminders may continue until {d.deadline}.")
     return 0
 
@@ -506,7 +486,15 @@ def cmd_daily(args, con):
         if status is UNCHECKED:
             print("no claims waiting; claim tracking not contacted")
         elif status:
-            print(f"claim tracking idle: {status}")
+            # Reported, not raised: a reminder layer that is down must not cost
+            # you the receipt sync that already succeeded above.
+            print(f"claim tracking {status}")
+            try:
+                notify.send(con, "costco-cli: claim tracking down",
+                            f"{len(drops)} drop(s) found but no claim workflow could be "
+                            f"started. {status}")
+            except Exception as e:
+                print(f"could not send the tracking alert: {e}")
         else:
             print(f"{started} claim workflow(s) started")
         if maybe_summary(con, status or "running"):

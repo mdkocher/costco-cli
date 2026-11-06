@@ -154,21 +154,21 @@ costco claims                # what you have settled, and what it came to
 Settled items drop off `costco drops` (use `--all` to see them anyway). If the
 same item is on more than one receipt, `claim` asks which with `--purchase`.
 
-### Optional: reminders before the deadline
+### Reminders before the deadline
 
 That much is just bookkeeping. To be *nudged* a week and a day before a window
-closes, there is an optional [LittleHorse](https://littlehorse.io) workflow: one
-run per claimable purchase line, holding a User Task open until you answer it.
+closes, a [LittleHorse](https://littlehorse.io) workflow holds one run per
+claimable purchase line, with a User Task open until you answer it.
 
-It is optional on purpose. SQLite stays the record — `costco claims` never needs
-a server — and the daily sync reconciles, so a server that loses everything is
-rebuilt from your own database the next morning.
-
-The SDK supports Python 3.10–3.13, so the worker needs its own interpreter:
+SQLite stays the record — `costco claims` never needs a server — and the daily
+sync reconciles, so a server that loses everything is rebuilt from your own
+database the next morning. But claim tracking is part of the tool, not an
+add-on: the SDK is a core dependency, which is why the CLI pins to Python
+3.10–3.13.
 
 ```bash
-python3.12 -m venv .venv-lh
-./.venv-lh/bin/pip install -e ".[littlehorse]"
+python3.12 -m venv .venv
+./.venv/bin/pip install -e ".[dev]"
 ```
 
 Start a server (the `KAFKA_DATA_DIR` setting is what makes its storage survive a
@@ -185,13 +185,13 @@ needs about half a minute after the container answers), registers the workflow,
 and handles the reminders until you stop it:
 
 ```bash
-./.venv-lh/bin/costco-worker
+./.venv/bin/costco-worker
 waiting for the LittleHorse server...
 registered costco-price-adjustment; serving costco-notify-drop and costco-record-claim
 ```
 
-With the extra absent, `costco claim` still records the outcome and says plainly
-that reminders will continue. Nothing else changes.
+If the server is unreachable, `costco claim` still records the outcome — SQLite
+is the record — and says plainly that reminders may continue until the deadline.
 
 ## Running on an always-on Mac
 
@@ -246,17 +246,11 @@ Delete that folder (and run `costco notify macos` first if you set up email) to 
 
 ```bash
 git clone https://github.com/mdkocher/costco-cli && cd costco-cli
-python3 -m venv .venv && ./.venv/bin/pip install -e '.[dev]'
+python3.12 -m venv .venv && ./.venv/bin/pip install -e '.[dev]'
 ./.venv/bin/pytest
 ```
 
-The tests for the optional LittleHorse layer skip themselves unless the extra is
-installed. To run them too, use an interpreter the SDK supports (3.10–3.13):
-
-```bash
-python3.12 -m venv .venv-lh && ./.venv-lh/bin/pip install -e '.[dev,littlehorse]'
-./.venv-lh/bin/pytest
-```
+Python 3.10–3.13, capped by the LittleHorse SDK.
 
 ## License
 
