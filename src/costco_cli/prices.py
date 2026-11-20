@@ -32,6 +32,7 @@ class Drop:
     deadline: date
     department: int = None
     from_history: bool = False   # found by comparing your own receipts
+    reopened_after: float = None  # dollars you skipped, if a bigger drop reopened the line
 
     @property
     def per_unit(self):

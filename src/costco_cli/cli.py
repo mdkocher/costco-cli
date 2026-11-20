@@ -202,10 +202,9 @@ def cmd_drops(args, con):
         con.commit()
     drops = prices.find_drops(con)
     # Drops you have already dealt with are history, not a to-do item.
-    decided = db.claim_outcomes(con)
     hidden = 0
     if not args.all:
-        kept = [d for d in drops if (d.purchase_id, d.item_number) not in decided]
+        kept = undecided(con, drops)
         hidden = len(drops) - len(kept)
         drops = kept
     if not drops:
@@ -214,7 +213,9 @@ def cmd_drops(args, con):
         return drops
     table([[d.deadline.isoformat(), day(d.purchased_at), d.source, d.item_number, (d.name or "")[:40],
             qty(d.quantity), money(d.paid_unit), money(d.now_unit), money(d.total),
-            d.reason + ("" if d.alertable else " (seasonal, no alert sent)")] for d in drops],
+            d.reason + ("" if d.alertable else " (seasonal, no alert sent)")
+            + (f" (bigger than the {money(d.reopened_after)} you skipped)"
+               if d.reopened_after is not None else "")] for d in drops],
           ["Claim by", "Bought", "Type", "Item", "Name", "Qty", "Paid", "Now", "Back", "Why"], right={5, 6, 7, 8})
     total = sum(d.total for d in drops)
     print(f"\n{money(total)} in possible price adjustments. Bring the receipt to the membership "
@@ -273,8 +274,7 @@ def start_claim_runs(con, drops):
     Returns (started, status): status is None when runs were actually started,
     UNCHECKED when there was nothing to reconcile, or a "DOWN - ..." reason.
     """
-    decided = db.claim_outcomes(con)
-    todo = [d for d in drops if (d.purchase_id, d.item_number) not in decided]
+    todo = undecided(con, drops)
     if not todo:
         # Nothing to reconcile, so the server was never contacted. Saying
         # "running" here would assert a health check that never happened.
@@ -291,11 +291,29 @@ def start_claim_runs(con, drops):
     return started, None
 
 
+def undecided(con, drops):
+    """The drops still waiting on you.
+
+    A decided line stays decided, with one exception: one you skipped whose
+    drop has since grown. Passing on $4 is not passing on $40, so the line
+    reopens, marked with what you skipped so it gets a fresh claim workflow.
+    """
+    decided = db.claim_decisions(con)
+    todo = []
+    for d in drops:
+        c = decided.get((d.purchase_id, d.item_number))
+        if c is None:
+            todo.append(d)
+        elif (c["outcome"] == "skipped" and c["amount"] is not None
+              and round(d.total * 100) > round(c["amount"] * 100)):   # whole cents, not floats
+            d.reopened_after = c["amount"]
+            todo.append(d)
+    return todo
+
+
 def open_claims(con):
     """Drops you have not settled yet, soonest deadline first."""
-    settled = db.claim_outcomes(con)
-    return [d for d in prices.find_drops(con)
-            if (d.purchase_id, d.item_number) not in settled]
+    return undecided(con, prices.find_drops(con))
 
 
 def pick_claim(drops, ask=input):
@@ -356,7 +374,8 @@ def _settle(con, d, outcome, note=None):
 
     try:
         if lh.complete_claim(d.purchase_id, d.item_number,
-                             claimed=(outcome == "claimed"), note=note):
+                             claimed=(outcome == "claimed"), note=note,
+                             reopened_after=d.reopened_after):
             print("  Claim workflow closed; no more reminders.")
         else:
             print("  Nothing open on the server for it, so there was nothing to close.")
@@ -495,7 +514,9 @@ def cmd_daily(args, con):
         return 1
     try:
         drops = prices.find_drops(con)
-        fresh = notify_new_drops(con, drops)
+        # Only what you can still act on: a drop on a line you already settled
+        # would tell you to run `costco claim` for something it then refuses.
+        fresh = notify_new_drops(con, undecided(con, drops))
         quiet = [d for d in fresh if not d.alertable]
         print(f"{len(fresh)} new price drops"
               + (f" ({len(quiet)} seasonal, no alert sent)" if quiet else ""))

@@ -64,7 +64,7 @@ DEFAULT_FINAL_NUDGE_SECONDS = (30 - FINAL_NUDGE_DAYS_LEFT) * _DAY
 
 # ---------- run identity (decision 1A) ----------
 
-def run_id_for(purchase_id, item_number):
+def run_id_for(purchase_id, item_number, reopened_after=None):
     """A deterministic WfRun id for one purchase line.
 
     LittleHorse requires run ids to be valid hostnames, so the natural
@@ -75,9 +75,16 @@ def run_id_for(purchase_id, item_number):
     never collide on one run, however the slug comes out.
 
     Deterministic, so starting the same line twice is a no-op on the server.
+
+    A line you skipped and that a bigger drop reopened needs a new run: the
+    first one has completed, and its id cannot be reused. Keying it by the
+    amount you skipped keeps it deterministic until you decide again.
     """
     slug = re.sub(r"[^a-z0-9]+", "-", f"{purchase_id}-{item_number}".lower()).strip("-")[:40]
-    digest = hashlib.sha256(f"{purchase_id}:{item_number}".encode()).hexdigest()[:8]
+    key = f"{purchase_id}:{item_number}"
+    if reopened_after is not None:
+        key += f":reopened-{reopened_after:.2f}"
+    digest = hashlib.sha256(key.encode()).hexdigest()[:8]
     return f"claim-{slug}-{digest}" if slug else f"claim-{digest}"
 
 
@@ -362,7 +369,7 @@ def ensure_run(drop, config=None, today=None):
     Returns the run id if a run was started, None if one already existed.
     """
     config = config or LHConfig()
-    run_id = run_id_for(drop.purchase_id, drop.item_number)
+    run_id = run_id_for(drop.purchase_id, drop.item_number, drop.reopened_after)
     variables = variables_for(drop, today=today)
     try:
         config.stub().RunWf(RunWfRequest(
@@ -386,7 +393,8 @@ def pending_user_task(run_id, config=None):
     return None
 
 
-def complete_claim(purchase_id, item_number, claimed=True, note=None, config=None):
+def complete_claim(purchase_id, item_number, claimed=True, note=None, config=None,
+                   reopened_after=None):
     """Answer the User Task for one purchase line.
 
     Returns True if a task was completed, False if the server had nothing open
@@ -394,7 +402,7 @@ def complete_claim(purchase_id, item_number, claimed=True, note=None, config=Non
     was never started because the server was down that morning.
     """
     config = config or LHConfig()
-    run_id = run_id_for(purchase_id, item_number)
+    run_id = run_id_for(purchase_id, item_number, reopened_after)
     utr = pending_user_task(run_id, config=config)
     if utr is None:
         return False

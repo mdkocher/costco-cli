@@ -128,6 +128,12 @@ def claim_outcomes(con):
             for r in con.execute("SELECT purchase_id, item_number, outcome FROM claims")}
 
 
+def claim_decisions(con):
+    """{(purchase_id, item_number): row with outcome and amount} for every decided claim."""
+    return {(r["purchase_id"], r["item_number"]): r
+            for r in con.execute("SELECT purchase_id, item_number, outcome, amount FROM claims")}
+
+
 def claims(con, limit=None):
     """Decided claims, newest first, with the item name where we know it."""
     sql = ("SELECT c.*, COALESCE(i.name, '') AS name FROM claims c"

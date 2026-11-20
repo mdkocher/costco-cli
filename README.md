@@ -81,7 +81,7 @@ costco claim 1707952         # you got it back
 costco claim 1707952 --skip  # not worth the trip
 ```
 
-Settled items drop off `costco drops`; `costco refunds` shows them next to what Costco actually refunded.
+Settled items drop off `costco drops`; `costco refunds` shows them next to what Costco actually refunded. A skip is not forever: if the price falls further and the drop grows past what you skipped, the item comes back with a fresh alert and claim reminders.
 
 To be reminded a week and a day before a claim deadline, run a [LittleHorse](https://littlehorse.io) server (needs Docker) and its worker. One command sets up both:
 

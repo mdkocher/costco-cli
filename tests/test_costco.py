@@ -452,9 +452,11 @@ def test_expired_is_recorded_when_nothing_was_decided():
 # ---------- reconciliation, without the SDK ----------
 
 class _FakeDrop:
-    def __init__(self, purchase_id, item_number):
+    def __init__(self, purchase_id, item_number, total=10.0):
         self.purchase_id = purchase_id
         self.item_number = item_number
+        self.total = total
+        self.reopened_after = None
 
 
 class _FakeEnsureRun:
@@ -1232,3 +1234,198 @@ def test_vocabulary_comes_from_what_you_actually_bought():
                                            [line("1707952", "KSOXI POWDER", 2, 29.98)], "R1"))
     vocab = finds.vocabulary(con)
     assert "ksoxi" in vocab and "powder" in vocab
+
+
+# ---------- a bigger drop reopens a line you skipped ----------
+
+def _drop(purchase_id="R1", item_number="1366351", paid=493.99, now=492.99, quantity=4):
+    return prices.Drop(purchase_id=purchase_id, source="online", purchased_at="2026-11-08T12:00:00",
+                       item_number=item_number, name="TIRES", quantity=quantity, paid_unit=paid,
+                       now_unit=now, reason="costco.com price dropped",
+                       deadline=date(2026, 12, 8))
+
+
+def test_an_undecided_drop_is_open():
+    from costco_cli import cli
+    d = _drop()
+    assert cli.undecided(db.connect(":memory:"), [d]) == [d]
+    assert d.reopened_after is None
+
+
+def test_a_skipped_drop_stays_closed_at_the_same_amount():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    assert cli.undecided(con, [_drop()]) == []
+
+
+def test_a_skipped_drop_stays_closed_when_it_shrinks():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    assert cli.undecided(con, [_drop(now=493.49)]) == []     # $2 back now
+
+
+def test_a_bigger_drop_reopens_a_skipped_line():
+    """Passing on $4 is not passing on $160."""
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    d = _drop(now=453.99)                                    # $40 a tire
+    assert cli.undecided(con, [d]) == [d]
+    assert d.total == 160.00
+    assert d.reopened_after == 4.00
+
+
+def test_a_cent_more_is_bigger_but_float_noise_is_not():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    assert cli.undecided(con, [_drop(now=492.9875)]) == []   # total rounds to 4.00
+    assert len(cli.undecided(con, [_drop(quantity=1, paid=5.00, now=0.99)])) == 1
+
+
+@pytest.mark.parametrize("outcome", ["claimed", "expired"])
+def test_only_a_skip_reopens(outcome):
+    """A claimed line was adjusted at the counter; an expired one is past its
+    window. Neither is something a bigger drop can reopen here."""
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, outcome)
+    assert cli.undecided(con, [_drop(now=453.99)]) == []
+
+
+def test_a_skip_with_no_recorded_amount_stays_closed():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", None, "skipped")
+    assert cli.undecided(con, [_drop(now=453.99)]) == []
+
+
+def test_reopening_is_per_purchase_line():
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    other = _drop(purchase_id="R2")
+    assert cli.undecided(con, [_drop(), other]) == [other]
+    assert other.reopened_after is None
+
+
+def test_a_reopened_line_shows_in_open_claims(monkeypatch):
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    monkeypatch.setattr(cli.prices, "find_drops", lambda con: [_drop(now=453.99)])
+    [d] = cli.open_claims(con)
+    assert d.reopened_after == 4.00
+
+
+def test_reconciliation_starts_a_run_for_a_reopened_line(monkeypatch):
+    from costco_cli import cli
+    fake = _FakeEnsureRun()
+    monkeypatch.setattr(cli.lh, "ensure_run", fake)
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    assert cli.start_claim_runs(con, [_drop(now=453.99)]) == (1, None)
+    assert fake.started == [("R1", "1366351")]
+
+
+def test_a_reopened_line_gets_its_own_run_id():
+    """The first run completed when you skipped; its id cannot start again."""
+    first = lh.run_id_for("R1", "1366351")
+    again = lh.run_id_for("R1", "1366351", 4.00)
+    assert again != first
+    assert HOSTNAME_LABEL.match(again)
+
+
+def test_a_reopened_run_id_is_deterministic():
+    """Keyed by what you skipped, not today's price, so a price that moves
+    again tomorrow is still the same run and is not started twice."""
+    assert lh.run_id_for("R1", "1366351", 4.00) == lh.run_id_for("R1", "1366351", 4.0)
+    assert lh.run_id_for("R1", "1366351", 4.00) != lh.run_id_for("R1", "1366351", 9.00)
+
+
+def test_no_reopen_keeps_existing_run_ids():
+    """Runs already on the server must keep the id they were started with."""
+    assert lh.run_id_for("R1", "1366351", None) == lh.run_id_for("R1", "1366351")
+
+
+class _RecordingStub:
+    def __init__(self):
+        self.requests = []
+
+    def RunWf(self, request):
+        self.requests.append(request)
+
+
+def test_ensure_run_starts_the_reopened_run_with_the_new_amount():
+    stub = _RecordingStub()
+    d = _drop(now=453.99)
+    d.reopened_after = 4.00
+    assert lh.ensure_run(d, config=_FakeConfig(stub), today=date(2026, 11, 20)) \
+        == lh.run_id_for("R1", "1366351", 4.00)
+    [req] = stub.requests
+    assert req.id == lh.run_id_for("R1", "1366351", 4.00)
+    assert req.variables["dollars_back"].double == 160.00
+
+
+def test_settling_a_reopened_line_closes_the_reopened_run(monkeypatch, capsys):
+    from costco_cli import cli
+    calls = []
+    monkeypatch.setattr(cli.lh, "complete_claim",
+                        lambda p, i, **kw: calls.append((p, i, kw)) or True)
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    [d] = cli.undecided(con, [_drop(now=453.99)])
+    cli._settle(con, d, "claimed")
+    assert calls == [("R1", "1366351", {"claimed": True, "note": None, "reopened_after": 4.00})]
+    row = db.claim_decisions(con)[("R1", "1366351")]
+    assert (row["outcome"], row["amount"]) == ("claimed", 160.00)
+    assert cli.undecided(con, [_drop(now=453.99)]) == []
+
+
+def test_skipping_again_raises_the_bar(monkeypatch):
+    """Skip $160 and it takes more than $160 to ask again."""
+    from costco_cli import cli
+    monkeypatch.setattr(cli.lh, "complete_claim", lambda *a, **kw: True)
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    [d] = cli.undecided(con, [_drop(now=453.99)])
+    cli._settle(con, d, "skipped")
+    assert cli.undecided(con, [_drop(now=453.99)]) == []
+    [again] = cli.undecided(con, [_drop(now=443.99)])
+    assert again.reopened_after == 160.00
+
+
+def test_the_daily_alert_skips_settled_lines_and_reports_reopened_ones(monkeypatch):
+    """An alert for a settled line tells you to run `costco claim` for
+    something it then refuses; a reopened one is worth the email."""
+    from costco_cli import cli
+    sent = []
+    monkeypatch.setattr(cli.sync, "run", lambda con, **kw: None)
+    monkeypatch.setattr(cli.notify, "send", lambda con, title, body: sent.append((title, body)))
+    monkeypatch.setattr(cli.lh, "ensure_run", lambda d: None)
+    monkeypatch.setattr(cli, "maybe_summary", lambda con, status: False)
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    db.record_claim(con, "R2", "1366351", 4.00, "claimed")
+
+    monkeypatch.setattr(cli.prices, "find_drops",
+                        lambda con: [_drop(now=492.99), _drop(purchase_id="R2", now=453.99)])
+    assert cli.cmd_daily(None, con) == 0
+    assert sent == []
+
+    monkeypatch.setattr(cli.prices, "find_drops", lambda con: [_drop(now=453.99)])
+    assert cli.cmd_daily(None, con) == 0
+    [(title, body)] = sent
+    assert title == "Costco price drop" and "$160.00" in body and "costco claim 1366351" in body
+
+
+def test_drops_lists_a_reopened_line_with_what_you_skipped(monkeypatch, capsys):
+    from costco_cli import cli
+    con = db.connect(":memory:")
+    db.record_claim(con, "R1", "1366351", 4.00, "skipped")
+    monkeypatch.setattr(cli.prices, "find_drops", lambda con: [_drop(now=453.99)])
+    cli.cmd_drops(_parse("drops"), con)
+    out = capsys.readouterr().out
+    assert "$160.00" in out and "you skipped" in out and "already settled" not in out
