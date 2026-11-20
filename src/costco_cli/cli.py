@@ -71,6 +71,10 @@ def cmd_sync(args, con):
 
 
 def cmd_receipts(args, con):
+    if args.days is None:
+        args.days = config.PRICE_ADJUST_DAYS if args.open else 90
+    if args.open:
+        return cmd_returns(args, con)
     if args.id:
         p = con.execute("SELECT * FROM purchases WHERE id = ? OR id LIKE ?", (args.id, f"%{args.id}")).fetchone()
         if not p:
@@ -206,7 +210,7 @@ def cmd_drops(args, con):
         drops = kept
     if not drops:
         print("No price drops on anything bought in the last 30 days."
-              + (f" ({hidden} already settled: costco settled)" if hidden else ""))
+              + (f" ({hidden} already settled: costco refunds)" if hidden else ""))
         return drops
     table([[d.deadline.isoformat(), day(d.purchased_at), d.source, d.item_number, (d.name or "")[:40],
             qty(d.quantity), money(d.paid_unit), money(d.now_unit), money(d.total),
@@ -215,12 +219,12 @@ def cmd_drops(args, con):
     total = sum(d.total for d in drops)
     print(f"\n{money(total)} in possible price adjustments. Bring the receipt to the membership "
           "counter, or use costco.com chat for online orders.\nSettle one: costco claim"
-          + (f"\n{hidden} already settled; see costco settled." if hidden else ""))
+          + (f"\n{hidden} already settled; see costco refunds." if hidden else ""))
     return drops
 
 
 def cmd_settled(args, con):
-    rows = db.claims(con, limit=args.limit)
+    rows = db.claims(con, limit=getattr(args, "limit", None))
     if not rows:
         print("Nothing settled yet. Price drops waiting on you: costco drops")
         return
@@ -536,6 +540,18 @@ def cmd_coupons(args, con):
 
 
 def cmd_refunds(args, con):
+    """What you got back: what you recorded settling, then what Costco refunded.
+
+    These used to be two commands (`settled` and `refunds`) answering halves of
+    the same question; side by side, a claim with no matching refund stands out.
+    """
+    print("Settled by you\n")
+    cmd_settled(args, con)
+    print("\nRefunded by Costco\n")
+    return costco_refunds(args, con)
+
+
+def costco_refunds(args, con):
     """What Costco actually gave back — as opposed to what you recorded.
 
     A full-price refund is a return; one for a fraction of what you paid is a
@@ -634,6 +650,47 @@ def worker_running():
         return False
 
 
+def worker_status_text():
+    installed, loaded, running = ops.worker_status()
+    if not installed:
+        return "not installed"
+    return (f"installed, {'loaded' if loaded else 'NOT loaded'}, "
+            f"{'running' if running else 'NOT running'}")
+
+
+SERVER_STATES = {"running": "running. Dashboard: http://localhost:8080",
+                 "stopped": "stopped",
+                 "absent": "no container yet",
+                 "no-docker": "Docker is not running. Start Docker Desktop first."}
+
+
+def cmd_reminders(args, con):
+    """Claim reminders need the server (timers) and the worker (delivery).
+
+    Neither is any use without the other, so they start, stop and report as
+    one. The old `server` and `worker` commands still work, unlisted.
+    """
+    if args.action == "start":
+        try:
+            print(f"Server: {ops.server_start()}.")
+        except RuntimeError as e:
+            sys.exit(str(e))
+        path, _ = ops.worker_install()
+        print(f"Worker: installed and loaded ({path}).")
+        print("The server takes about 20 seconds to accept work; the worker waits for it.")
+    elif args.action == "stop":
+        print("Worker: " + ("removed." if ops.worker_uninstall() else "was not installed."))
+        try:
+            print("Server: " + ("stopped." if ops.server_stop() else "was not running."))
+        except RuntimeError as e:
+            sys.exit(f"Server: {e}")
+    else:
+        print(f"Server: {SERVER_STATES[ops.server_state()]}")
+        print(f"Worker: {worker_status_text()}")
+        print(f"Log:    {config.LOG_DIR / 'worker.log'}")
+    return 0
+
+
 def cmd_worker(args, con):
     """The task worker: without it, nudges queue instead of arriving."""
     if args.action == "install":
@@ -645,7 +702,7 @@ def cmd_worker(args, con):
     else:
         installed, loaded, running = ops.worker_status()
         if not installed:
-            print("Not installed — costco worker install")
+            print("Not installed — costco reminders start")
         else:
             print(f"Installed, {'loaded' if loaded else 'NOT loaded'}, "
                   f"{'running' if running else 'NOT running'}")
@@ -666,8 +723,8 @@ def cmd_server(args, con):
     else:
         state = ops.server_state()
         print({"running": "Running. Dashboard: http://localhost:8080",
-               "stopped": "Stopped — costco server start",
-               "absent": "No container yet — costco server start",
+               "stopped": "Stopped — costco reminders start",
+               "absent": "No container yet — costco reminders start",
                "no-docker": "Docker is not running. Start Docker Desktop first."}[state])
     return 0
 
@@ -698,7 +755,7 @@ def cmd_status(args, con):
     print("\nRecord")
     purchases = con.execute("SELECT COUNT(*) FROM purchases").fetchone()[0]
     print(f"  last sync      {db.get_meta(con, 'last_sync', 'never')}   ({plural(purchases, 'purchase')})")
-    print(f"  settled        {settled_total}   — costco settled")
+    print(f"  settled        {settled_total}   — costco refunds")
     print(f"  already told   {plural(suppressed, 'drop')} suppressed as previously alerted")
 
     print("\nDelivery")
@@ -717,9 +774,9 @@ def cmd_status(args, con):
     print(f"  server         {'reachable' if ok else 'DOWN — ' + detail}")
     w_installed, _, w_running = ops.worker_status()
     print(f"  worker         {'running' if w_running else 'NOT running'}"
-          f"{'' if w_installed else '  (not installed — costco worker install)'}")
+          f"{'' if w_installed else '  (not installed — costco reminders start)'}")
     if not (ok and w_running):
-        print("  Reminders will not fire until both are up.")
+        print("  Reminders will not fire until both are up: costco reminders start")
     return 0
 
 
@@ -812,8 +869,9 @@ def cmd_schedule(args, con):
 
 # ---------- parser ----------
 
-def add_range(p, default_days):
-    p.add_argument("--days", type=int, default=default_days, help=f"look back this many days (default {default_days})")
+def add_range(p, default_days, default_help=None):
+    p.add_argument("--days", type=int, default=default_days,
+                   help=f"look back this many days (default {default_help or default_days})")
     p.add_argument("--since", help="start date YYYY-MM-DD")
     p.add_argument("--year", type=int, help="a calendar year, e.g. 2026")
 
@@ -821,9 +879,10 @@ def add_range(p, default_days):
 EPILOG = """\
 Grouped, since the list above is alphabetical by accident:
 
-  money waiting    drops · claim · settled · refunds · returns · coupons\n  browsing         finds
+  money waiting    drops · claim · refunds · coupons
   your purchases   receipts · item · spend
-  setup            login · sync · notify · summary · schedule · worker · server
+  browsing         finds
+  setup            login · sync · notify · summary · schedule · reminders
 
 Run costco with no command for where things stand right now.
 """
@@ -848,7 +907,9 @@ def build_parser():
     p = sub.add_parser("receipts", help="list purchases, or show one receipt/order by ID")
     p.add_argument("id", nargs="?", help="receipt barcode or order number (a suffix is enough)")
     p.add_argument("--type", choices=["warehouse", "gas", "online"])
-    add_range(p, 90)
+    p.add_argument("--open", action="store_true",
+                   help="items still inside the price-adjustment or return window")
+    add_range(p, None, default_help="90, or 30 with --open")
     p.set_defaults(fn=cmd_receipts)
 
     p = sub.add_parser("item", help="purchase history for an item (name search or item number)")
@@ -860,10 +921,6 @@ def build_parser():
     add_range(p, 365)
     p.set_defaults(fn=cmd_spend)
 
-    p = sub.add_parser("returns", help="items still inside the price-adjustment or return window")
-    p.add_argument("--days", type=int, default=config.PRICE_ADJUST_DAYS)
-    p.set_defaults(fn=cmd_returns)
-
     p = sub.add_parser("claim", help="settle a price adjustment and stop the reminders")
     p.add_argument("item", nargs="?", help="item number; omit to pick from a list")
     p.add_argument("--purchase", help="receipt or order id, when the item is on more than one")
@@ -871,12 +928,9 @@ def build_parser():
     p.add_argument("--note", help="anything worth remembering")
     p.set_defaults(fn=cmd_claim)
 
-    p = sub.add_parser("settled", help="price adjustments you have already settled")
-    p.add_argument("--limit", type=int, default=None, help="show only the most recent N")
-    p.set_defaults(fn=cmd_settled)
-
-    p = sub.add_parser("refunds", help="returns and price adjustments Costco actually refunded")
-    p.add_argument("--days", type=int, default=90, help="how far back to look, default 90")
+    p = sub.add_parser("refunds", help="what you got back: adjustments you settled, and what Costco refunded")
+    p.add_argument("--days", type=int, default=90, help="how far back to look for refunds, default 90")
+    p.add_argument("--limit", type=int, default=None, help="show only the N most recent settled")
     p.set_defaults(fn=cmd_refunds)
 
     p = sub.add_parser("drops", help="price drops you can claim on recent purchases")
@@ -906,13 +960,9 @@ def build_parser():
     p.add_argument("--off", action="store_true", help="stop sending them")
     p.add_argument("--send", action="store_true", help="email it now, whenever the last one went")
     p.set_defaults(fn=cmd_summary)
-    p = sub.add_parser("worker", help="the task worker that delivers reminders")
-    p.add_argument("action", choices=["status", "install", "uninstall"], nargs="?", default="status")
-    p.set_defaults(fn=cmd_worker)
-
-    p = sub.add_parser("server", help="the LittleHorse server that holds the claim timers")
+    p = sub.add_parser("reminders", help="the server and worker behind claim reminders: start, stop, status")
     p.add_argument("action", choices=["status", "start", "stop"], nargs="?", default="status")
-    p.set_defaults(fn=cmd_server)
+    p.set_defaults(fn=cmd_reminders)
 
     p = sub.add_parser("schedule", help="run sync + drop alerts daily in the background")
     p.add_argument("action", choices=["install", "uninstall", "status"], nargs="?", default="status")
@@ -921,6 +971,21 @@ def build_parser():
 
     p = sub.add_parser("daily")  # what the scheduled job runs; no help, so unlisted
     p.set_defaults(fn=cmd_daily)
+
+    # Old names, folded into the commands above. Kept working (no help, so
+    # unlisted) because scripts, notes and muscle memory still use them.
+    p = sub.add_parser("settled")
+    p.add_argument("--limit", type=int, default=None)
+    p.set_defaults(fn=cmd_settled)
+    p = sub.add_parser("returns")
+    p.add_argument("--days", type=int, default=config.PRICE_ADJUST_DAYS)
+    p.set_defaults(fn=cmd_returns)
+    p = sub.add_parser("server")
+    p.add_argument("action", choices=["status", "start", "stop"], nargs="?", default="status")
+    p.set_defaults(fn=cmd_server)
+    p = sub.add_parser("worker")
+    p.add_argument("action", choices=["status", "install", "uninstall"], nargs="?", default="status")
+    p.set_defaults(fn=cmd_worker)
     return ap
 
 

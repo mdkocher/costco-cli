@@ -953,7 +953,7 @@ def test_status_warns_when_tracking_is_down(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "server         DOWN" in out
     assert "worker         NOT running" in out
-    assert "Reminders will not fire until both are up." in out
+    assert "Reminders will not fire until both are up: costco reminders start" in out
 
 
 def test_status_does_not_warn_when_both_are_up(monkeypatch, capsys):
@@ -972,7 +972,90 @@ def test_plurals_read_correctly():
 def test_status_points_at_install_when_the_worker_agent_is_missing(monkeypatch, capsys):
     cli = _quiet_checks(monkeypatch, worker=False, installed=False)
     cli.cmd_status(argparse.Namespace(), _status_con())
-    assert "costco worker install" in capsys.readouterr().out
+    assert "costco reminders start" in capsys.readouterr().out
+
+
+# ---------- folded commands ----------
+
+def _parse(*argv):
+    from costco_cli import cli
+    return cli.build_parser().parse_args(list(argv))
+
+
+def test_help_lists_only_the_new_names():
+    from costco_cli import cli
+    listed = cli.build_parser().format_help()
+    assert "reminders" in listed
+    for old in ("settled", "returns", "server", "worker"):
+        assert not re.search(rf"^\s+{old}\s", listed, re.M), old
+
+
+def test_old_names_still_parse():
+    from costco_cli import cli
+    assert _parse("settled").fn is cli.cmd_settled
+    assert _parse("returns").days == 30
+    assert _parse("server", "start").fn is cli.cmd_server
+    assert _parse("worker", "install").fn is cli.cmd_worker
+
+
+def test_receipts_open_defaults_to_the_adjustment_window(capsys):
+    from costco_cli import cli
+    con, _ = _refund_con()
+    args = _parse("receipts", "--open")
+    cli.cmd_receipts(args, con)
+    out = capsys.readouterr().out
+    assert args.days == 30
+    assert "KSOXIPOWDER" in out and "inside a 30-day window" in out
+
+
+def test_receipts_without_open_still_looks_back_90_days():
+    from costco_cli import cli
+    args = _parse("receipts")
+    cli.cmd_receipts(args, db.connect(":memory:"))
+    assert args.days == 90
+
+
+def test_refunds_shows_settled_and_refunded(capsys):
+    from costco_cli import cli
+    con, _ = _refund_con()
+    cli.cmd_refunds(_parse("refunds"), con)
+    out = capsys.readouterr().out
+    assert out.index("Settled by you") < out.index("Refunded by Costco")
+    assert "Nothing settled yet" in out and "No refunds in the last 90 days" in out
+
+
+def _fake_ops(monkeypatch, calls, server="absent"):
+    from costco_cli import cli
+    monkeypatch.setattr(cli.ops, "server_start", lambda: calls.append("server_start") or "created")
+    monkeypatch.setattr(cli.ops, "server_stop", lambda: calls.append("server_stop") or True)
+    monkeypatch.setattr(cli.ops, "server_state", lambda: server)
+    monkeypatch.setattr(cli.ops, "worker_install",
+                        lambda: calls.append("worker_install") or ("/tmp/w.plist", "costco-worker"))
+    monkeypatch.setattr(cli.ops, "worker_uninstall", lambda: calls.append("worker_uninstall") or True)
+    monkeypatch.setattr(cli.ops, "worker_status", lambda: (True, True, True))
+    return cli
+
+
+def test_reminders_start_brings_up_server_then_worker(monkeypatch):
+    calls = []
+    cli = _fake_ops(monkeypatch, calls)
+    cli.cmd_reminders(_parse("reminders", "start"), None)
+    assert calls == ["server_start", "worker_install"]
+
+
+def test_reminders_stop_takes_down_worker_then_server(monkeypatch):
+    calls = []
+    cli = _fake_ops(monkeypatch, calls)
+    cli.cmd_reminders(_parse("reminders", "stop"), None)
+    assert calls == ["worker_uninstall", "server_stop"]
+
+
+def test_reminders_status_reports_both(monkeypatch, capsys):
+    cli = _fake_ops(monkeypatch, [], server="stopped")
+    cli.cmd_reminders(_parse("reminders"), None)
+    out = capsys.readouterr().out
+    assert "Server: stopped" in out
+    assert "Worker: installed, loaded, running" in out
 
 
 # ---------- the installed copy vs the source ----------

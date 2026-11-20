@@ -101,14 +101,14 @@ machine that cannot reach the server is the normal case, not the edge case.
 One interpreter, one venv: the SDK ships with the CLI.
 
 ```bash
-costco server start    # pinned image, persistent volume, the right env vars
-costco worker install  # LaunchAgent: restarts itself, waits when the server is down
+costco reminders start  # server: pinned image, persistent volume, the right env vars
+                        # worker: LaunchAgent that restarts itself and waits for the server
 ```
 
-Both wrap what used to be copy-pasted. `costco server` and `costco worker`
-report state; bare `costco` shows both alongside the money waiting.
+Both wrap what used to be copy-pasted. `costco reminders` reports both, and
+`costco reminders stop` takes both down; bare `costco` shows both alongside the money waiting.
 
-`costco server start` passes `KAFKA_DATA_DIR` for you, which matters more than it
+`costco reminders start` passes `KAFKA_DATA_DIR` for you, which matters more than it
 looks: the image's entrypoint sets `KAFKA_LOG_DIR` but tests `KAFKA_DATA_DIR`, so
 without it Kafka is reformatted with a new cluster id on every boot and a persistent
 volume makes the second start fail outright. A flag you never type is a flag you

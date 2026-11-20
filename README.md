@@ -47,19 +47,17 @@ costco                    # where things stand: money waiting, last sync, alerts
 | `costco sync [--days N]` | Pull new purchases, item names, online prices and the coupon book. |
 | `costco drops [--all]` | Price drops you can claim. |
 | `costco claim [item] [--skip] [--purchase ID] [--note ...]` | Record a price adjustment as claimed or skipped. Omit the item to pick from a list. |
-| `costco settled [--limit N]` | Adjustments you have already settled. |
-| `costco refunds [--days 90]` | What Costco actually refunded: returns and adjustments. |
+| `costco refunds [--days 90] [--limit N]` | What you got back: adjustments you settled, and what Costco actually refunded. |
 | `costco receipts [ID] [--type warehouse\|gas\|online] [--days N\|--since D\|--year Y]` | List purchases, or show one receipt/order (a suffix of the ID is enough). |
+| `costco receipts --open [--days 30]` | Items still inside the price-adjustment window (`--days 90` for electronics returns). |
 | `costco item <name or item #>` | Purchase history, plus any active coupon and current online price. |
 | `costco spend [--by month\|year\|type\|where\|dept]` | Spending summary. |
-| `costco returns [--days 30]` | Items still inside a return/adjustment window. |
 | `costco coupons [search] [--mine]` | Current warehouse coupon book. |
 | `costco finds [--all] [--limit N]` | New and discounted items other shoppers spotted, matched to what you buy. |
 | `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
 | `costco notify [status\|email\|test\|macos]` | Where alerts go. |
 | `costco summary [--send\|--days N\|--off]` | The periodic digest: print it, send it, or change how often. |
-| `costco server [status\|start\|stop]` | The LittleHorse server that holds claim reminders. |
-| `costco worker [status\|install\|uninstall]` | The task worker that delivers reminders. |
+| `costco reminders [status\|start\|stop]` | The server and worker behind claim reminders. |
 
 ## Alerts
 
@@ -83,13 +81,12 @@ costco claim 1707952         # you got it back
 costco claim 1707952 --skip  # not worth the trip
 ```
 
-Settled items drop off `costco drops`.
+Settled items drop off `costco drops`; `costco refunds` shows them next to what Costco actually refunded.
 
-To be reminded a week and a day before a claim deadline, run a [LittleHorse](https://littlehorse.io) server (needs Docker) and its worker:
+To be reminded a week and a day before a claim deadline, run a [LittleHorse](https://littlehorse.io) server (needs Docker) and its worker. One command sets up both:
 
 ```bash
-costco server start    # pinned image, persistent volume
-costco worker install  # LaunchAgent that restarts itself
+costco reminders start   # Docker container + a LaunchAgent worker that restarts itself
 ```
 
 SQLite stays the record: claims work without the server, and the daily sync rebuilds the server's state if it is lost. Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
