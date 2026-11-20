@@ -1,6 +1,6 @@
 # costco-cli
 
-Track your Costco purchases and catch price adjustments from the terminal. No phone app, no third-party service: your receipts are pulled from your own Costco account into a local SQLite file.
+Track your Costco purchases and catch price adjustments from the terminal. No phone app, no third-party service: receipts are pulled from your own Costco account into a local SQLite file.
 
 ```
 $ costco drops
@@ -13,39 +13,27 @@ $14.40 in possible price adjustments. Bring the receipt to the membership counte
 
 ## What it does
 
-- **Syncs** warehouse receipts, gas receipts and costco.com orders (with line items and prices) into `~/.local/share/costco-cli/costco.db`.
-- **`drops`** finds things you bought in the last 30 days that are now cheaper, so you can claim Costco's price adjustment:
-  - warehouse purchases vs. the current warehouse coupon book
-  - warehouse purchases vs. a later receipt of your own for the same item at the same warehouse
-  - online purchases vs. today's costco.com price
-- **`item`** shows every time you bought something and what you paid.
-- **`spend`** summarizes spending by month, year, type (warehouse / online / gas), location or department.
-- **`returns`** lists items still inside the price-adjustment (30 day) or electronics return (90 day) window.
-- **`coupons`** shows the current coupon book, or just the items you've bought before (`--mine`).
-- **`claim`** / **`claims`** record what you did about an adjustment, so you can see what you actually got back.
-- **`schedule`** runs a sync every morning and alerts you when there is money to claim, by macOS notification or email.
+- **Syncs** warehouse receipts, gas receipts and costco.com orders, with line items and prices.
+- **Finds price drops** on anything bought in the last 30 days, so you can claim Costco's price adjustment. Warehouse purchases are checked against the coupon book and your own later receipts; online purchases against today's costco.com price.
+- **Tracks claims** you make or skip, and what Costco actually refunded.
+- **Reports** purchase history per item, spending by month/type/department, and open return windows.
+- **Runs daily** in the background and alerts you by macOS notification or email, with a weekly summary so silence means something.
 
 ## Install
 
-Requires macOS, Python 3.10+, and Google Chrome.
+Requires macOS, Python 3.10–3.13, and Google Chrome.
 
 ```bash
 pipx install git+https://github.com/mdkocher/costco-cli
-```
-
-Or with pip:
-
-```bash
-pip install git+https://github.com/mdkocher/costco-cli
 ```
 
 ## Quick start
 
 ```bash
 costco login              # a Chrome window opens; sign in to Costco yourself
-costco receipts           # last 90 days of purchases
 costco drops              # anything to claim?
-costco schedule install   # daily sync + notifications at 07:00
+costco schedule install   # daily sync + alerts at 07:00
+costco                    # where things stand: money waiting, last sync, alerts
 ```
 
 `costco login` also runs the first sync, which pulls up to two years of history.
@@ -54,234 +42,75 @@ costco schedule install   # daily sync + notifications at 07:00
 
 | Command | |
 |---|---|
-| `costco login` | Sign in once in a Chrome window. Run again when the saved session expires. |
+| `costco` | Status: money waiting and deadlines, last sync, alert setup, background services. |
+| `costco login` | Sign in once in a Chrome window. Run again when the session expires. |
 | `costco sync [--days N]` | Pull new purchases, item names, online prices and the coupon book. |
-| `costco receipts [ID] [--type warehouse\|gas\|online] [--days N\|--since D\|--year Y]` | List purchases, or show one receipt/order (a suffix of the ID is enough). |
-| `costco item <name or item #>` | Purchase history, plus any active coupon and the current online price. |
-| `costco spend [--by month\|year\|type\|where\|dept]` | Spending summary. |
-| `costco returns [--days 30]` | Items still inside a return/adjustment window. |
-| `costco drops` | Price drops you can claim. |
-| `costco coupons [search] [--mine]` | Current warehouse coupon book. |
-| `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
-| `costco claim [item] [--skip] [--purchase ID] [--note ...]` | Settle a price adjustment; omit the item to pick from a list. |
+| `costco drops [--all]` | Price drops you can claim. |
+| `costco claim [item] [--skip] [--purchase ID] [--note ...]` | Record a price adjustment as claimed or skipped. Omit the item to pick from a list. |
 | `costco settled [--limit N]` | Adjustments you have already settled. |
 | `costco refunds [--days 90]` | What Costco actually refunded: returns and adjustments. |
-| `costco finds [--all] [--limit N]` | New and discounted items shoppers spotted, matched to what you buy. |
+| `costco receipts [ID] [--type warehouse\|gas\|online] [--days N\|--since D\|--year Y]` | List purchases, or show one receipt/order (a suffix of the ID is enough). |
+| `costco item <name or item #>` | Purchase history, plus any active coupon and current online price. |
+| `costco spend [--by month\|year\|type\|where\|dept]` | Spending summary. |
+| `costco returns [--days 30]` | Items still inside a return/adjustment window. |
+| `costco coupons [search] [--mine]` | Current warehouse coupon book. |
+| `costco finds [--all] [--limit N]` | New and discounted items other shoppers spotted, matched to what you buy. |
+| `costco schedule [install\|uninstall\|status] [--time HH:MM]` | Daily background sync with alerts (launchd). |
 | `costco notify [status\|email\|test\|macos]` | Where alerts go. |
-| `costco summary [--send\|--days N\|--off]` | The periodic digest: print, send, or reschedule. |
+| `costco summary [--send\|--days N\|--off]` | The periodic digest: print it, send it, or change how often. |
+| `costco server [status\|start\|stop]` | The LittleHorse server that holds claim reminders. |
 | `costco worker [status\|install\|uninstall]` | The task worker that delivers reminders. |
-| `costco server [status\|start\|stop]` | The LittleHorse server that holds the timers. |
 
 ## Alerts
 
-By default alerts are macOS notifications on the machine running the schedule. That only reaches you at that Mac, so to get them by email as well:
+Alerts are macOS notifications by default. To get them by email too:
 
 ```bash
-costco notify email   # prompts for the addresses, SMTP host/port, and an app password (hidden)
-# step-by-step walkthrough: docs/SETUP.md#4-set-up-email-alerts
+costco notify email   # prompts for addresses, SMTP host/port, and an app password
 costco notify test
 ```
 
-The app password is stored in the macOS Keychain (service `costco-cli-email`), never in a file. The addresses and SMTP settings go in the local database. `costco notify macos` switches back and deletes the Keychain entry.
+The password is kept in the macOS Keychain (`costco-cli-email`), never in a file. Gmail needs an [app password](https://myaccount.google.com/apppasswords); any SMTP server over implicit TLS works (default `smtp.gmail.com:465`). If sending fails, the alert still shows as a macOS notification.
 
-Gmail needs an [app password](https://myaccount.google.com/apppasswords) rather than your account password, and that requires two-step verification. Any SMTP server over implicit TLS works; the defaults are `smtp.gmail.com:465`.
+You get an alert when new price drops appear, when the Costco sign-in expires, and when a daily run fails. A summary arrives weekly (`costco summary --days N` to change it), so no mail at all means something is wrong.
 
-If sending mail fails, the alert still appears as a macOS notification, so it is never silently lost.
+## Claims and reminders
 
-You get an alert when new price drops show up, carrying the command to settle
-them, and when the saved Costco sign-in has expired.
-
-Two more, so that silence from the daily job means something rather than
-nothing:
-
-- **If a run fails** — a crash, or an unreachable LittleHorse server — it mails
-  you rather than dying quietly in the log.
-- **A periodic summary** — weekly by default — of what has actually happened:
-
-  ```
-  Costco summary, 7 days to 2026-11-05
-
-  Sync      last run 2026-11-05, 144 purchases tracked
-  Bought    3 receipts, $76.95 (2 warehouse, 1 gas)
-  Waiting   2 adjustment(s), $16.00
-               $12.00  Kirkland Oxi Powder     by 2026-11-25 (20d)
-                $4.00  Head Gloves             by 2026-12-02 (27d)
-  Settled   1 claimed $12.00
-  Refunds   none
-  Tracking  running
-  ```
-
-  It goes on elapsed days rather than a fixed weekday, so a Mac asleep on
-  Monday does not skip the period. Read it without waiting, or change how
-  often it arrives:
-
-  ```bash
-  costco summary            # print it now
-  costco summary --send     # email it now, to see what actually lands
-  costco summary --days 1   # every morning instead
-  costco summary --off
-  ```
-
-  `Tracking` says `not checked (nothing waiting)` on a quiet period: with no
-  claims to reconcile the daily job never contacts the server, so the summary
-  does not claim a health check it did not perform.
-
-So no mail between one weekly note and the next means something is wrong,
-rather than just a quiet month at Costco.
-
-## Where things stand
-
-```bash
-costco
-```
-
-With no command it leads with the money waiting and its deadlines, then what it
-has synced, where alerts go, and whether the pieces that deliver reminders are
-actually up. `costco --help` is still there for the command list.
-
-## Settling claims
-
-A price adjustment has a deadline — 30 days from purchase — and `costco drops`
-only tells you it exists. `costco claim` records what you did about it:
-
-Run it with no arguments and it asks:
-
-```
-$ costco claim
-Price adjustments waiting on you:
-
-  1.   $12.00  Kirkland Oxi Powder    claim by 2026-11-25 (20d left)
-  2.    $4.00  Head Gloves            claim by 2026-12-02 (27d left)
-
-Which one? [1-2, Enter to quit] 1
-Did you get the $12.00 back? [y/n, Enter to quit] y
-Claimed: $12.00 on Kirkland Oxi Powder.
-```
-
-Or name the item directly, which is what the alerts tell you to do:
+`costco claim` records what you did about a drop. With no arguments it lists what's waiting and asks; with an item number it settles that one:
 
 ```bash
 costco claim 1707952         # you got it back
 costco claim 1707952 --skip  # not worth the trip
-costco settled               # what you have settled, and what it came to
 ```
 
-Settled items drop off `costco drops` (use `--all` to see them anyway). If the
-same item is on more than one receipt, `claim` asks which with `--purchase`.
+Settled items drop off `costco drops`.
 
-### Reminders before the deadline
-
-That much is just bookkeeping. To be *nudged* a week and a day before a window
-closes, a [LittleHorse](https://littlehorse.io) workflow holds one run per
-claimable purchase line, with a User Task open until you answer it.
-
-SQLite stays the record — `costco settled` never needs a server — and the daily
-sync reconciles, so a server that loses everything is rebuilt from your own
-database the next morning. But claim tracking is part of the tool, not an
-add-on: the SDK is a core dependency, which is why the CLI pins to Python
-3.10–3.13.
+To be reminded a week and a day before a claim deadline, run a [LittleHorse](https://littlehorse.io) server (needs Docker) and its worker:
 
 ```bash
-python3.12 -m venv .venv
-./.venv/bin/pip install -e ".[dev]"
+costco server start    # pinned image, persistent volume
+costco worker install  # LaunchAgent that restarts itself
 ```
 
-Start a server (the `KAFKA_DATA_DIR` setting is what makes its storage survive a
-restart — without it the image reformats Kafka on every boot):
-
-```bash
-docker run --name lh-standalone -d -v lh-data:/data -e KAFKA_DATA_DIR=/data/kafka \
-  -p 2023:2023 -p 8080:8080 -p 9092:9092 \
-  ghcr.io/littlehorse-enterprises/littlehorse/lh-standalone:1.3.1
-```
-
-Then run the worker. It waits for the server to finish starting (Kafka Streams
-needs about half a minute after the container answers), registers the workflow,
-and handles the reminders until you stop it:
-
-```bash
-costco server start    # pinned image, persistent volume, the right env vars
-costco worker install  # a LaunchAgent that restarts itself if it dies
-```
-
-Both report with `costco server` and `costco worker`, and bare `costco` shows
-whether they are up. To run the worker in the foreground instead:
-
-```bash
-costco-worker
-waiting for the LittleHorse server...
-registered costco-price-adjustment; serving costco-nudge-claim and costco-record-claim
-```
-
-If the server is unreachable, `costco claim` still records the outcome — SQLite
-is the record — and says plainly that reminders may continue until the deadline.
-
-## Browsing what others found
-
-```bash
-costco finds          # matched against what you buy
-costco finds --all    # everything in the feed
-```
-
-Reads [costco97.com](https://costco97.com)'s public feed, where shoppers post new
-and discounted items, and keeps the ones sharing at least two distinctive words
-with your own purchase history.
-
-It is browse-only on purpose, and stays out of the alerts and the summary. The
-feed is national, carries no item numbers, and does not cover Bend — its
-warehouse tags mean "stocked here", not "on clearance here at this price". It
-shows no prices either: a deal post contains the sale price, the regular price
-and the saving with nothing to tell them apart, and a confident wrong price is
-worse than none. Follow the link for the real figure.
+SQLite stays the record: claims work without the server, and the daily sync rebuilds the server's state if it is lost. Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Running on an always-on Mac
 
-Full walkthrough, including email setup and troubleshooting: **[docs/SETUP.md](docs/SETUP.md)**.
+The full walkthrough, including email setup and troubleshooting, is in **[docs/SETUP.md](docs/SETUP.md)**. In short: install, `costco login` (needs the screen; Screen Sharing works), `costco notify email`, `costco schedule install`, and keep the Mac awake and logged in.
 
-Short version:
+## How it works and privacy
 
-1. Install Google Chrome and Python 3 (`brew install python pipx`).
-2. `pipx install git+https://github.com/mdkocher/costco-cli`
-3. `costco login`. This needs the Mac's screen; Screen Sharing from another Mac works.
-4. `costco notify email`
-5. `costco schedule install --time 07:00`
-6. Keep it from sleeping (System Settings > Energy > Prevent automatic sleeping). launchd also runs a missed job when the Mac wakes.
+Costco's sign-in blocks automated browsers, so you sign in yourself in a normal Chrome window with a dedicated profile. `costco` then reads the short-lived session token the website already keeps and calls the same endpoints as costco.com's Orders & Purchases page. Your password is never seen or stored, and the token is held only in memory during a sync.
 
-The job runs as a LaunchAgent, so your user needs to be logged in (after a restart, log in once). When the Costco sign-in eventually expires you'll get an alert; connect with Screen Sharing and run `costco login`.
-
-## How it works
-
-How the pieces fit together, what each store holds, and what happens when any of it
-breaks: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
-
-
-Costco's sign-in page blocks automated browsers, so `costco` never drives the login. It starts a normal Chrome window with a dedicated profile (`~/.local/share/costco-cli/chrome-profile`) and you sign in yourself. Afterwards it briefly connects to that Chrome over a local DevTools port to read the short-lived session token the costco.com website already keeps, then calls the same JSON endpoints the website's Orders & Purchases page uses. Later syncs reuse the saved profile headlessly.
-
-- Your password is never seen, typed, or stored by this tool.
-- The session token is held in memory only for the length of a sync.
-- Item names and online prices come from Costco's public product endpoint. The coupon book comes from the public warehouse-savings page.
-
-## Privacy
-
-Everything stays on your machine under `~/.local/share/costco-cli` (override with `COSTCO_CLI_HOME`):
-
-```
-costco.db         your purchases, item names, prices and coupons
-chrome-profile/   the Chrome profile holding your Costco sign-in
-logs/daily.log    output of the scheduled job
-```
-
-Plus, if you use email alerts, one Keychain item named `costco-cli-email`.
-
-Delete that folder (and run `costco notify macos` first if you set up email) to remove everything.
+Everything stays under `~/.local/share/costco-cli` (override with `COSTCO_CLI_HOME`): the database, the Chrome profile, and logs. To remove it all, run `costco notify macos` (deletes the Keychain entry) and delete that folder.
 
 ## Caveats
 
-- Unofficial. This uses Costco's website endpoints, which can change without notice. It only reads your own account, a few requests per sync.
-- In-store prices aren't published anywhere, so a warehouse drop is only visible two ways: the item is in the current coupon book, or you bought it again at the same warehouse for less. The costco.com price is a different price list (it carries shipping and handling, and normally runs above the warehouse price), so it is never used to judge a warehouse purchase. Gas is tracked for spending only.
-- Price drops found by comparing your own receipts are reported in `costco drops` but only texted about outside seasonal departments, where the price tracks the market rather than a markdown. See `NO_ALERT_DEPARTMENTS` in `config.py`.
+- Unofficial: Costco's website endpoints can change without notice.
+- In-store prices aren't published, so warehouse drops only show up via the coupon book or a cheaper later receipt of your own. Online prices are never used to judge warehouse purchases. Gas is tracked for spending only.
 - Price adjustments are at Costco's discretion. Check the item and date before heading to the counter.
-- macOS only for now (Chrome path, launchd, Keychain, notifications). Set `COSTCO_CLI_CHROME` to point at a different Chrome binary.
+- `costco finds` reads a public national feed with no prices or item numbers, so it's browse-only and never triggers alerts.
+- macOS only for now. Set `COSTCO_CLI_CHROME` to use a different Chrome binary.
 
 ## Development
 
@@ -290,8 +119,6 @@ git clone https://github.com/mdkocher/costco-cli && cd costco-cli
 python3.12 -m venv .venv && ./.venv/bin/pip install -e '.[dev]'
 ./.venv/bin/pytest
 ```
-
-Python 3.10–3.13, capped by the LittleHorse SDK.
 
 ## License
 
